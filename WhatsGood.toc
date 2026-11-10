@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: WhatsGood
+## Notes: Dims quest and important bag items so you don't vendor or delete them. Settings panel (/wg) and minimap button included. Shift bypasses protection.
+## Author: WhatsGood
+## Version: 1.1.0
+## SavedVariables: WhatsGoodDB
+WhatsGood.lua

@@ -1,0 +1,22 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+*.bak
+.idea/
+.vscode/
+*.code-workspace
+
+# Build / packaging artifacts
+*.zip
+*.tar.gz
+release/
+releases/
+pkg/
+
+# WoW client droppings (SavedVariables live outside the addon dir; ignore if copied in by mistake)
+SavedVariables/
+Bindings-cache.wtf
