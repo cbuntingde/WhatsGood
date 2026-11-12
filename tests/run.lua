@@ -647,8 +647,7 @@ local names = {
   "WhatsGoodCheckAutosell", "WhatsGoodCheckSound", "WhatsGoodCheckMinimap", "WhatsGoodCheckQuestLog",
   "WhatsGoodQuality0", "WhatsGoodQuality1", "WhatsGoodQuality2",
   "WhatsGoodQuality3", "WhatsGoodQuality4", "WhatsGoodQuality5",
-  "WhatsGoodCustomInset", "WhatsGoodCustomInput",
-  "WhatsGoodAddButton", "WhatsGoodRemoveButton",
+  "WhatsGoodCustomInset",
 }
 local rects = {}
 local inBounds, noOverlap = true, true
@@ -751,23 +750,46 @@ end
 check(xbtn ~= nil, "row has a remove button")
 xbtn.scripts.OnClick()
 check(_G.WhatsGoodDB.custom[4002] == nil, "row remove button unprotects")
-local input = _G.WhatsGoodCustomInput
-input:SetText("5001")
-input.scripts.OnEnterPressed(input)
-check(_G.WhatsGoodDB.custom[5001] == true, "enter in the input box adds")
-check(input.text == "Shift-click an item here", "input resets to its hint")
-input:SetText("5002")
-_G.WhatsGoodAddButton.scripts.OnClick()
-check(_G.WhatsGoodDB.custom[5002] == true, "Add button adds from the input")
-input:SetText("5002")
-_G.WhatsGoodRemoveButton.scripts.OnClick()
-check(_G.WhatsGoodDB.custom[5002] == nil, "Remove button removes from the input")
+check(_G.WhatsGoodCustomInput == nil, "no shift-click input box remains")
+check(_G.WhatsGoodAddButton == nil and _G.WhatsGoodRemoveButton == nil,
+  "no Add/Remove buttons remain")
+wg("add 5001")
+check(_G.WhatsGoodDB.custom[5001] == true, "/wg add still protects an item")
+wg("remove 5001")
+check(_G.WhatsGoodDB.custom[5001] == nil, "/wg remove still unprotects an item")
 
 -- Drag-to-add: an item dropped on the list is protected, and the cursor is
 -- cleared so the item returns to its bag slot.
 _G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = true, "item", 6001, "item:6001"
 scroll.scripts.OnReceiveDrag(scroll)
 check(_G.WhatsGoodDB.custom[6001] == true, "dropping a bag item on the list protects it")
+-- The confirmation names the item and its ID, taken from the dropped link.
+_G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID = true, "item", 6004
+_G._CURSOR_LINK = "|cff1eff00|Hitem:6004:0:0:0|h[Dropped Name]|h|r"
+scroll.scripts.OnReceiveDrag(scroll)
+check(string.find(_G.CHAT[#_G.CHAT], "[Dropped Name] (item 6004)", 1, true) ~= nil,
+  "drop message shows the item name and ID")
+-- The client has no cached name for 6004, yet the row shows the link's name.
+local droppedRow
+for _, r in ipairs(visibleRows()) do
+  if r.id == 6004 then droppedRow = r end
+end
+check(droppedRow and droppedRow.name.text:find("Dropped Name", 1, true) ~= nil,
+  "list row shows the dropped item's name when the client has no cache")
+check(_G.WhatsGoodDB.customNames[6004] == "Dropped Name", "name is saved with the item")
+wg("remove 6004")
+check(_G.WhatsGoodDB.customNames[6004] == nil, "removing an item drops its saved name")
+-- Typed /wg add with a link keeps the name for later, when the cache is empty.
+wg("add |cff1eff00|Hitem:6005:0:0:0|h[Saved Name]|h|r")
+_G.INFO[6005] = nil
+check(_G.WhatsGoodDB.customNames[6005] == "Saved Name", "/wg add with a link saves the name")
+local savedRow
+for _, r in ipairs(visibleRows()) do
+  if r.id == 6005 then savedRow = r end
+end
+check(savedRow and savedRow.name.text:find("Saved Name", 1, true) ~= nil,
+  "row falls back to the saved name")
+wg("remove 6005")
 check(_G._CURSOR == false, "drop clears the cursor")
 -- A click while holding an item counts as a drop (OnMouseUp path); the id
 -- falls back to the link when the cursor reports no numeric id.

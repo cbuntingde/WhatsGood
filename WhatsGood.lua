@@ -23,6 +23,7 @@ local DEFAULTS = {
   minimapShown = true,
   minimapAngle = 215, -- degrees around the minimap, 0 = east
   custom = {}, -- [itemID] = true, always protected
+  customNames = {}, -- [itemID] = name, so list rows show names before the client caches the item
   learned = {}, -- [itemID] = true, quest items remembered across sessions
 }
 
@@ -789,7 +790,7 @@ local QUALITY_NAMES = {
 
 local panel, cbQuest, cbQuestLog, cbSoul, cbHearth, cbMini, cbTrade, cbMail, cbAuction, cbSound, cbAuto
 local swatches = {} -- quality chips, index = quality + 1
-local qText, statusText, customInput
+local qText, statusText
 local panelBuilt, panelUpdating = false, false
 local WG_RefreshPanel, WG_SyncMinimap -- forward declarations (used before defined)
 
@@ -808,27 +809,57 @@ local function WG_ApplyAndRefresh()
   WG_RefreshPanel()
 end
 
--- Hint text shown in the custom-item input box until it gains focus.
-local WG_INPUT_HINT = "Shift-click an item here"
-
 -- Parse an item link, a raw item: link, or a plain number into an item ID.
 local function WG_ParseItemText(text)
   if type(text) ~= "string" then return nil end
   text = WG_Trim(text)
-  if text == "" or text == WG_INPUT_HINT then return nil end
+  if text == "" then return nil end
   return tonumber(string.match(text, "item:(%d+)")) or tonumber(text)
 end
 
 -- Custom list entries: shared by the panel buttons and /wg add|remove so
 -- both surfaces enforce the same validation and messages.
-local function WG_AddCustom(id)
+-- "[Name] (item 1234)" when the name is known, else "item 1234". The link
+-- (if any) supplies the name first, so a just-dropped item shows even before
+-- the client has cached it; GetItemInfo covers typed IDs.
+-- The display name inside an item link ("|h[Name]|h"), or nil.
+local function WG_NameFromLink(link)
+  if type(link) ~= "string" then return nil end
+  return string.match(link, "|h%[(.-)%]|h")
+end
+
+-- Best known name for an item: the client cache first, then the name we saved
+-- when it was added (the cache can be empty for a while after a fresh login).
+local function WG_ItemName(id)
+  if type(GetItemInfo) == "function" then
+    local okI, gName = pcall(GetItemInfo, id)
+    if okI and type(gName) == "string" and gName ~= "" then
+      if db and type(db.customNames) == "table" then db.customNames[id] = gName end
+      return gName
+    end
+  end
+  if db and type(db.customNames) == "table" and type(db.customNames[id]) == "string" then
+    return db.customNames[id]
+  end
+  return nil
+end
+
+local function WG_ItemLabel(id, link)
+  local name = WG_NameFromLink(link) or WG_ItemName(id)
+  if name then return "[" .. name .. "] (item " .. id .. ")" end
+  return "item " .. id
+end
+
+local function WG_AddCustom(id, link)
   if not db then Msg("still loading, try again in a moment."); return end
   if not id or id <= 0 or id ~= math.floor(id) then
-    Msg("usage: /wg add <shift-click link|itemID>")
+    Msg("usage: /wg add <item link|itemID>")
     return
   end
   db.custom[id] = true
-  Msg("protecting item " .. id .. ".")
+  local linkName = WG_NameFromLink(link)
+  if linkName and type(db.customNames) == "table" then db.customNames[id] = linkName end
+  Msg("protecting " .. WG_ItemLabel(id, link) .. ".")
   infoCache[id] = nil
   WG_ApplyAndRefresh()
 end
@@ -836,10 +867,11 @@ end
 local function WG_RemoveCustom(id)
   if not db then Msg("still loading, try again in a moment."); return end
   if not id or id <= 0 or id ~= math.floor(id) then
-    Msg("usage: /wg remove <shift-click link|itemID>")
+    Msg("usage: /wg remove <item link|itemID>")
     return
   end
   db.custom[id] = nil
+  if type(db.customNames) == "table" then db.customNames[id] = nil end
   Msg("unprotected item " .. id .. ".")
   infoCache[id] = nil
   WG_ApplyAndRefresh()
@@ -855,7 +887,7 @@ local function WG_CursorDrop()
   if not okC or ctype ~= "item" then return end
   local id = tonumber(cid) or WG_ParseItemText(clink)
   if not id then return end
-  WG_AddCustom(id)
+  WG_AddCustom(id, clink)
   if type(ClearCursor) == "function" then pcall(ClearCursor) end
 end
 
@@ -1026,10 +1058,12 @@ local function WG_RefreshCustomList()
     row.id = id
     row:SetWidth(customChild:GetWidth())
     row:SetPoint("TOPLEFT", 0, -(i - 1) * LIST_ROW_H)
-    local ok, name, _, quality, _, _, _, _, _, _, tex = pcall(GetItemInfo, id)
+    local ok, _, _, quality, _, _, _, _, _, _, tex = pcall(GetItemInfo, id)
     if not ok then name, quality, tex = nil, nil, nil end
     row.icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
-    row.name:SetText(WG_QualityHex(quality) .. (name or ("item:" .. id)) .. "|r")
+    -- Live client name when cached, else the saved name, else the raw ID.
+    local shown = WG_ItemName(id) or ("item:" .. id)
+    row.name:SetText(WG_QualityHex(quality) .. shown .. "|r")
     row:Show()
   end
   local viewH = (customScroll.GetHeight and customScroll:GetHeight()) or LIST_H
@@ -1391,72 +1425,10 @@ local function WG_BuildPanel()
   customEmpty = customChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   customEmpty:SetPoint("CENTER", customChild, "CENTER", 0, 0)
   customEmpty:SetJustifyH("CENTER")
-  customEmpty:SetText("No custom items yet.\nDrag an item from your bags here,\nor shift-click one into the box below.")
+  customEmpty:SetText("No custom items yet.\nDrag an item from your bags onto this list.")
   y = y - LIST_H - 10
 
-  -- Input row: shift-click box plus Add / Remove, same validation as /wg.
-  local okInput, input = pcall(CreateFrame, "EditBox", "WhatsGoodCustomInput",
-    panel, "InputBoxTemplate")
-  if not okInput or not input then
-    okInput, input = pcall(CreateFrame, "EditBox", "WhatsGoodCustomInput", panel)
-  end
-  if okInput and input then
-    customInput = input
-    input:SetWidth(252)
-    input:SetHeight(26)
-    input:SetPoint("TOPLEFT", PAD, y)
-    if input.SetFontObject then pcall(input.SetFontObject, input, "GameFontHighlightSmall") end
-    pcall(input.SetAutoFocus, input, false)
-    input:SetScript("OnEnterPressed", function(self)
-      local id = WG_ParseItemText(self:GetText())
-      if id then WG_AddCustom(id) end
-      pcall(self.SetText, self, WG_INPUT_HINT)
-      pcall(self.ClearFocus, self)
-    end)
-    input:SetScript("OnEscapePressed", function(self)
-      pcall(self.ClearFocus, self)
-    end)
-    input:SetScript("OnEditFocusGained", function(self)
-      if (self:GetText() or "") == WG_INPUT_HINT then self:SetText("") end
-    end)
-    input:SetScript("OnEditFocusLost", function(self)
-      if (self:GetText() or "") == "" then self:SetText(WG_INPUT_HINT) end
-    end)
-    pcall(input.SetText, input, WG_INPUT_HINT)
-  end
-
-  local function WG_ItemFromInput()
-    if not customInput then return nil end
-    local id = WG_ParseItemText(customInput.GetText and customInput:GetText() or nil)
-    pcall(customInput.SetText, customInput, WG_INPUT_HINT)
-    pcall(customInput.ClearFocus, customInput)
-    return id
-  end
-
-  local addBtn = CreateFrame("Button", "WhatsGoodAddButton", panel, "UIPanelButtonTemplate")
-  if addBtn then
-    addBtn:SetWidth(78)
-    addBtn:SetHeight(24)
-    addBtn:SetPoint("TOPLEFT", PAD + 260, y - 1)
-    addBtn:SetText("Add")
-    addBtn:SetScript("OnClick", function()
-      local id = WG_ItemFromInput()
-      if id then WG_AddCustom(id) end
-    end)
-  end
-
-  local removeBtn = CreateFrame("Button", "WhatsGoodRemoveButton", panel, "UIPanelButtonTemplate")
-  if removeBtn then
-    removeBtn:SetWidth(78)
-    removeBtn:SetHeight(24)
-    removeBtn:SetPoint("TOPLEFT", PAD + 346, y - 1)
-    removeBtn:SetText("Remove")
-    removeBtn:SetScript("OnClick", function()
-      local id = WG_ItemFromInput()
-      if id then WG_RemoveCustom(id) end
-    end)
-  end
-  y = y - 26 - 16
+  y = y - 16
 
   -- Footer: height derives from the cursor, so nothing ever overlaps.
   local footerH = 24
@@ -1628,7 +1600,7 @@ function WG_ResetDB()
   -- Learned quest items are observed facts, not settings: keep them.
   local keep = db.learned
   for k, v in pairs(DEFAULTS) do
-    if k == "custom" or k == "learned" then db[k] = {} else db[k] = v end
+    if k == "custom" or k == "customNames" or k == "learned" then db[k] = {} else db[k] = v end
   end
   if type(keep) == "table" then db.learned = keep end
   WG_ApplyAndRefresh()
@@ -1788,7 +1760,7 @@ local function WG_HandleSlash(input)
   end
   if cmd == "add" or cmd == "remove" then
     local id = WG_ParseItemText(rest)
-    if cmd == "add" then WG_AddCustom(id) else WG_RemoveCustom(id) end
+    if cmd == "add" then WG_AddCustom(id, rest) else WG_RemoveCustom(id) end
     return
   end
   if cmd == "list" then
@@ -1868,11 +1840,15 @@ local function WG_SanitizeDB()
     if db[k] == nil then
       -- Copy tables by value: sharing a DEFAULTS table by reference would
       -- let /wg add mutate the defaults for the rest of the session.
-      if k == "custom" or k == "learned" then db[k] = {} else db[k] = v end
+      if k == "custom" or k == "customNames" or k == "learned" then db[k] = {} else db[k] = v end
     end
   end
   if type(db.custom) ~= "table" then db.custom = {} end
+  if type(db.customNames) ~= "table" then db.customNames = {} end
   if type(db.learned) ~= "table" then db.learned = {} end
+  for id, name in pairs(db.customNames) do
+    if type(id) ~= "number" or id <= 0 or type(name) ~= "string" then db.customNames[id] = nil end
+  end
   for id in pairs(db.learned) do
     if type(id) ~= "number" or id <= 0 then db.learned[id] = nil end
   end

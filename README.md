@@ -44,15 +44,15 @@ Junk (quality `0`) is never protected unless it is a quest item (with quest prot
 - `/wg autosell on|off` — auto-sell junk when a merchant opens (default off)
 - `/wg minimap on|off` — toggle minimap button
 - `/wg sound on|off` — play a sound when an action is blocked (default off)
-- `/wg add <shift-click link|itemID>` — always protect an item
-- `/wg remove <shift-click link|itemID>` — unprotect a custom item
+- `/wg add <item link|itemID>` — always protect an item
+- `/wg remove <item link|itemID>` — unprotect a custom item
 - `/wg list` — show custom list
 - `/wg audit` — list unprotected bag items with reasons (read-only)
 - `/wg selljunk` — sell unprotected poor-quality bag items to the open merchant
 - `/wg reset` — restore all settings to defaults (clears the custom list, keeps learned quest items)
 - `/wg refresh` — re-dim all bags
 
-Settings panel (`/wg`) is a classic WoW dialog: stone background and gold border, title banner, corner close button, six quality chips in the game's own colors (the active one lit, with a live "Guarding ..." status line in the header), two-column protection and options toggles with hover explanations, a scrolling custom-item list (icons, quality-colored names, item tooltips, per-row remove; drag a bag item onto the list to protect it), and a shift-click input box with Add / Remove, plus Sell Junk / Reset / Close (draggable, `Esc` closes). Corrupt settings are sanitized on load.
+Settings panel (`/wg`) is a classic WoW dialog: stone background and gold border, title banner, corner close button, six quality chips in the game's own colors (the active one lit, with a live "Guarding ..." status line in the header), two-column protection and options toggles with hover explanations, a scrolling custom-item list (icons, quality-colored names, item tooltips, per-row remove; drag a bag item onto the list to protect it and see its name and ID), plus Sell Junk / Reset / Close (draggable, `Esc` closes). Corrupt settings are sanitized on load.
 
 Minimap button: a custom round badge (gold rim, leather bag, gold coin; `Media/WhatsGoodMinimap.tga`). Left-click opens settings, right-click toggles quest protection, drag to reposition. Angle is saved in `WhatsGoodDB.minimapAngle`.
 
