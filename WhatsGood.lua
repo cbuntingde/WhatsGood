@@ -1,17 +1,18 @@
 -- WhatsGood: dim quest + important bag items, block accidental vendor/delete.
--- Standalone, no libraries. Works on WoW Forever 1.60.1 (Interface 16001).
+-- Standalone, no libraries. Works on WoW Forever 1.16.1 (Interface 16001).
 -- Protection can be bypassed by holding Shift.
 
 local ADDON = ...
 if type(ADDON) ~= "string" then ADDON = "WhatsGood" end
 
-local VERSION = "1.4.0"
+local VERSION = "1.6.0"
 
 -- Classic Hearthstone plus room for future stones (matched by ID or name).
 local HEARTHSTONE_IDS = { [6948] = true } -- extend here for future stones
 local DEFAULTS = {
   qualityThreshold = 3, -- 0 poor .. 5 legendary: auto-protect at/above this
   protectQuest = true,
+  protectQuestLog = true, -- learn items your active quests need as soon as they show up in bags
   protectSoulbound = true, -- only for quality >= 2 (green+), junk greys stay sellable; also covers Bind-on-Equip/Pickup greens+
   protectHearth = true,
   protectTrade = true,
@@ -38,9 +39,13 @@ local function Msg(text)
 end
 
 local function Warn(text)
-  DEFAULT_CHAT_FRAME:AddMessage("|cffff4040WhatsGood:|r " .. tostring(text))
+  -- Guard path: a broken chat/UI frame must never turn a block into a Lua
+  -- error that bricks the hooked action, so every sink here fails silent.
+  if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+    pcall(DEFAULT_CHAT_FRAME.AddMessage, DEFAULT_CHAT_FRAME, "|cffff4040WhatsGood:|r " .. tostring(text))
+  end
   if UIErrorsFrame and UIErrorsFrame.AddMessage then
-    UIErrorsFrame:AddMessage("WhatsGood: " .. tostring(text), 1, 0.25, 0.25, 1, 5)
+    pcall(UIErrorsFrame.AddMessage, UIErrorsFrame, "WhatsGood: " .. tostring(text), 1, 0.25, 0.25, 1, 5)
   end
   if db and db.warnSound and type(PlaySound) == "function" then
     pcall(PlaySound, "igQuestFailed")
@@ -83,6 +88,20 @@ local function WG_ItemID(link, fallback)
     if id then return id end
   end
   return fallback
+end
+
+-- Bag slot count, retail first then vanilla. Fails open to 0 when neither
+-- client API exists (headless tests stub only the vanilla one).
+local function WG_GetNumSlots(bag)
+  if C_Container and type(C_Container.GetContainerNumSlots) == "function" then
+    local ok, n = pcall(C_Container.GetContainerNumSlots, bag)
+    if ok and type(n) == "number" then return n end
+  end
+  if type(GetContainerNumSlots) == "function" then
+    local ok, n = pcall(GetContainerNumSlots, bag)
+    if ok and type(n) == "number" then return n end
+  end
+  return 0
 end
 
 -- ---------- tooltip scan (quest / soulbound / quest-starter) ----------
@@ -159,15 +178,22 @@ end
 local function WG_Classify(itemID, link)
   -- returns protected (bool), reason (string)
   if not itemID then return false, "none" end
+  if not db then return false, "none" end
   if db.custom[itemID] then return true, "listed" end
   if type(db.learned) == "table" and db.learned[itemID] then return true, "learned" end
   if db.protectHearth and HEARTHSTONE_IDS[itemID] then return true, "hearthstone" end
 
   local name, _, quality, _, _, itype
   if link then
-    local ok
-    ok, name, link, quality, _, _, itype = pcall(GetItemInfo, link)
-    if not ok then name, quality, itype = nil, nil, nil end
+    local origLink = link
+    local ok, gName, gLink, gQ, _, _, gType = pcall(GetItemInfo, link)
+    if ok then
+      name, link, quality, itype = gName, gLink, gQ, gType
+    else
+      -- Keep the original link for the tooltip scan; the error string
+      -- from pcall must never replace it.
+      name, link, quality, itype = nil, origLink, nil, nil
+    end
   end
   if quality == nil then
     local ok2, _, _, q2, _, _, t2 = pcall(GetItemInfo, itemID)
@@ -243,16 +269,31 @@ local function WG_FindIcon(button)
   return nil
 end
 
-local function WG_ApplyDim(button)
+-- Reason -> tint. Used for both the dim shade and the thin slot outline,
+-- so you can tell at a glance why an item is protected.
+local WG_TINTS = {
+  ["rare+"]         = { 0.35, 0.55, 0.95 }, -- blue: quality at/above threshold
+  ["soulbound"]     = { 0.85, 0.25, 0.25 }, -- red: bound gear
+  ["bound item"]    = { 0.85, 0.25, 0.25 },
+  ["quest item"]    = { 0.90, 0.75, 0.25 }, -- gold: quest items and starters
+  ["quest starter"] = { 0.90, 0.75, 0.25 },
+  ["learned"]       = { 0.90, 0.75, 0.25 },
+  ["hearthstone"]   = { 0.95, 0.55, 0.15 }, -- orange: hearthstone variants
+  ["listed"]        = { 0.30, 0.85, 0.40 }, -- green: custom list
+}
+
+local function WG_TintFor(reason)
+  local t = reason and WG_TINTS[reason]
+  if t then return t[1], t[2], t[3] end
+  return 0.6, 0.6, 0.6 -- unknown reasons get a neutral grey
+end
+
+local function WG_ApplyDim(button, reason)
+  local r, g, b = WG_TintFor(reason)
   local icon = WG_FindIcon(button)
   if not button.wgShade then
     local shade = button:CreateTexture(nil, "OVERLAY")
     if shade then
-      if shade.SetColorTexture then
-        pcall(shade.SetColorTexture, shade, 0, 0, 0, 0.55)
-      else
-        pcall(shade.SetTexture, shade, 0, 0, 0, 0.55)
-      end
       if icon then
         pcall(shade.SetAllPoints, shade, icon)
       else
@@ -261,13 +302,58 @@ local function WG_ApplyDim(button)
     end
     button.wgShade = shade
   end
-  if button.wgShade and button.wgShade.Show then pcall(button.wgShade.Show, button.wgShade) end
+  -- Tinted dim: the reason color at half alpha over the desaturated icon.
+  if button.wgShade then
+    if button.wgShade.SetColorTexture then
+      pcall(button.wgShade.SetColorTexture, button.wgShade, r, g, b, 0.5)
+    elseif button.wgShade.SetTexture then
+      pcall(button.wgShade.SetTexture, button.wgShade, r, g, b, 0.5)
+    end
+    if button.wgShade.Show then pcall(button.wgShade.Show, button.wgShade) end
+  end
   if icon and icon.SetDesaturated then pcall(icon.SetDesaturated, icon, 1) end
+  -- Thin outline matching the tint, drawn as four color strips so no art
+  -- file is needed and every client renders the same clean edge.
+  local bo = button.wgBorders
+  if not bo then
+    bo = {}
+    button.wgBorders = bo
+    local anchor = icon or button
+    local function edge(c1, c2, x2, y2)
+      local tex = button:CreateTexture(nil, "OVERLAY")
+      if tex then
+        pcall(tex.SetColorTexture, tex, r, g, b, 0.95)
+        pcall(tex.SetPoint, tex, c1, anchor, c1, 0, 0)
+        pcall(tex.SetPoint, tex, c2, anchor, c2, x2, y2)
+      end
+      return tex
+    end
+    bo.top = edge("TOPLEFT", "TOPRIGHT", 0, -1.5)
+    bo.bottom = edge("BOTTOMLEFT", "BOTTOMRIGHT", 0, 1.5)
+    bo.left = edge("TOPLEFT", "BOTTOMLEFT", 1.5, 0)
+    bo.right = edge("TOPRIGHT", "BOTTOMRIGHT", -1.5, 0)
+  else
+    -- Recolor the existing border when the reason changed.
+    for _, tex in pairs(bo) do
+      if tex and tex.SetColorTexture then
+        pcall(tex.SetColorTexture, tex, r, g, b, 0.95)
+      end
+    end
+  end
+  for _, tex in pairs(bo) do
+    if tex and tex.Show then pcall(tex.Show, tex) end
+  end
   button.wgDimmed = true
 end
 
 local function WG_ClearDim(button)
   if button.wgShade and button.wgShade.Hide then pcall(button.wgShade.Hide, button.wgShade) end
+  local bo = button.wgBorders
+  if bo then
+    for _, tex in pairs(bo) do
+      if tex and tex.Hide then pcall(tex.Hide, tex) end
+    end
+  end
   if button.wgDimmed then
     local icon = WG_FindIcon(button)
     if icon and icon.SetDesaturated then pcall(icon.SetDesaturated, icon, 0) end
@@ -285,7 +371,7 @@ local function WG_UpdateButton(button, bag, slot)
   local protected, reason = WG_Classify(id, link)
   if protected then
     button.wgReason = reason
-    WG_ApplyDim(button)
+    WG_ApplyDim(button, reason)
   else
     WG_ClearDim(button)
   end
@@ -395,7 +481,10 @@ end
 -- Money and spells on the cursor are never items, so they always pass.
 local function WG_CursorDropBlocked(action, flag)
   if not db or not db[flag] then return false end
-  if IsShiftKeyDown and IsShiftKeyDown() then return false end
+  if type(IsShiftKeyDown) == "function" then
+    local okS, down = pcall(IsShiftKeyDown)
+    if okS and down then return false end
+  end
   local hasCursor = not CursorHasItem or CursorHasItem()
   if not hasCursor then return false end
   local ok, protected = pcall(WG_CursorProtected)
@@ -406,11 +495,21 @@ local function WG_CursorDropBlocked(action, flag)
   return false
 end
 
+-- Merchant visibility, fail-open: any missing global or client error means
+-- "not open". Protection must never brick UseContainerItem (using a
+-- hearthstone, potion, or food) just because this check misfires.
+local function WG_MerchantOpen()
+  if type(MerchantFrame) ~= "table" then return false end
+  if type(MerchantFrame.IsShown) ~= "function" then return false end
+  local ok, shown = pcall(MerchantFrame.IsShown, MerchantFrame)
+  return ok and shown and true or false
+end
+
 -- Shared merchant-sell check so the global and C_Container entry points
 -- enforce the same rule. Returns true when the sale must be blocked.
 local function WG_SellBlocked(bag, slot)
   if bag == nil or slot == nil then return false end
-  if not (MerchantFrame and MerchantFrame.IsShown and MerchantFrame:IsShown()) then
+  if not WG_MerchantOpen() then
     return false
   end
   if IsShiftKeyDown and IsShiftKeyDown() then return false end
@@ -436,21 +535,37 @@ end
 -- anything missing or unreadable fails open (allows) by design.
 local function WG_SlotSetBlocked(action, flag, count, getter)
   if not db or not db[flag] then return false end
-  if IsShiftKeyDown and IsShiftKeyDown() then return false end
+  if type(IsShiftKeyDown) == "function" then
+    local okS, down = pcall(IsShiftKeyDown)
+    if okS and down then return false end
+  end
   if type(getter) ~= "function" or type(count) ~= "number" then return false end
   for i = 1, count do
     local results = { pcall(getter, i) }
     if results[1] == true then
       for j = 2, #results do
         local v = results[j]
-        if type(v) == "string" and string.find(v, "item:%d+") then
-          local id = WG_ItemID(v, v)
-          if id then
-            local okP, prot = pcall(WG_Classify, id, v)
-            if okP and prot then
-              Warn("Not " .. action .. " a protected item. Hold Shift to force.")
-              return true
+        local id, link = nil, nil
+        if type(v) == "number" and v > 0 and v == math.floor(v) then
+          id = v
+        elseif type(v) == "string" and string.find(v, "item:%d+") then
+          local num = WG_ItemID(v, nil)
+          if type(num) == "number" then id, link = num, v end
+        elseif type(v) == "string" and v ~= "" and not string.find(v, "item:%d+") then
+          -- Name-only returns (auction sell info): resolve via GetItemInfo.
+          if type(GetItemInfo) == "function" then
+            local okI, _, link2 = pcall(GetItemInfo, v)
+            if okI and type(link2) == "string" then
+              local num = WG_ItemID(link2, nil)
+              if type(num) == "number" then id, link = num, link2 end
             end
+          end
+        end
+        if id then
+          local okP, prot = pcall(WG_Classify, id, link)
+          if okP and prot then
+            Warn("Not " .. action .. " a protected item. Hold Shift to force.")
+            return true
           end
           break
         end
@@ -464,7 +579,10 @@ local function WG_InstallBlocks()
   if not origUse and type(UseContainerItem) == "function" then
     origUse = UseContainerItem
     UseContainerItem = function(bag, slot, ...)
-      if WG_SellBlocked(bag, slot) then return end
+      -- Fail-open: any error in the sell check must still let the item be
+      -- used; only a confirmed protected+merchant-open sale is blocked.
+      local okB, blocked = pcall(WG_SellBlocked, bag, slot)
+      if okB and blocked then return end
       return origUse(bag, slot, ...)
     end
   end
@@ -474,7 +592,9 @@ local function WG_InstallBlocks()
   if not origCUse and C_Container and type(C_Container.UseContainerItem) == "function" then
     origCUse = C_Container.UseContainerItem
     C_Container.UseContainerItem = function(bag, slot, ...)
-      if WG_SellBlocked(bag, slot) then return end
+      -- Fail-open, same rule as the vanilla entry point above.
+      local okB, blocked = pcall(WG_SellBlocked, bag, slot)
+      if okB and blocked then return end
       return origCUse(bag, slot, ...)
     end
   end
@@ -498,8 +618,19 @@ local function WG_InstallBlocks()
   if not origDelete and type(DeleteCursorItem) == "function" then
     origDelete = DeleteCursorItem
     DeleteCursorItem = function(...)
-      local hasCursor = not CursorHasItem or CursorHasItem()
-      if hasCursor and not IsShiftKeyDown() then
+      local hasCursor = false
+      if type(CursorHasItem) == "function" then
+        local okC, held = pcall(CursorHasItem)
+        hasCursor = okC and held or false
+      else
+        hasCursor = lastPickup ~= nil
+      end
+      local shifted = false
+      if type(IsShiftKeyDown) == "function" then
+        local okS, down = pcall(IsShiftKeyDown)
+        shifted = okS and down or false
+      end
+      if hasCursor and not shifted then
         local ok, protected = pcall(WG_CursorProtected)
         if ok and protected then
           Warn("Not deleting: that item is protected. Hold Shift to force, then put it back first.")
@@ -570,14 +701,38 @@ local function WG_InstallBlocks()
   if not origStartAuction and type(StartAuction) == "function" then
     origStartAuction = StartAuction
     StartAuction = function(...)
-      if type(GetAuctionSellItemInfo) == "function" then
-        local ok, name = pcall(GetAuctionSellItemInfo)
-        if ok and type(name) == "string" and string.find(name, "item:%d+") then
-          local id = WG_ItemID(name, name)
+      if type(GetAuctionSellItemInfo) == "function" and db and db.protectAuction then
+        local results = { pcall(GetAuctionSellItemInfo) }
+        if results[1] == true then
+          local id, link = nil, nil
+          for j = 2, #results do
+            local v = results[j]
+            if type(v) == "number" and v > 0 and v == math.floor(v) then
+              id = v; break
+            elseif type(v) == "string" and string.find(v, "item:%d+") then
+              local num = WG_ItemID(v, nil)
+              if type(num) == "number" then id, link = num, v; break end
+            end
+          end
+          -- Name-only result: GetAuctionSellItemInfo returns the item name,
+          -- never a link, so resolve it the same way as the tooltip scan.
+          if not id and type(results[2]) == "string" and results[2] ~= ""
+            and type(GetItemInfo) == "function" then
+            local okI, _, link2 = pcall(GetItemInfo, results[2])
+            if okI and type(link2) == "string" then
+              local num = WG_ItemID(link2, nil)
+              if type(num) == "number" then id, link = num, link2 end
+            end
+          end
           if id then
-            local okP, prot = pcall(WG_Classify, id, name)
-            if okP and prot and db and db.protectAuction then
-              if not (IsShiftKeyDown and IsShiftKeyDown()) then
+            local okP, prot = pcall(WG_Classify, id, link)
+            if okP and prot then
+              local shifted = false
+              if type(IsShiftKeyDown) == "function" then
+                local okS, down = pcall(IsShiftKeyDown)
+                shifted = okS and down or false
+              end
+              if not shifted then
                 Warn("Not auctioning a protected item. Hold Shift to force.")
                 return
               end
@@ -632,8 +787,9 @@ local QUALITY_NAMES = {
   "Rare (blue)", "Epic (purple)", "Legendary (orange)",
 }
 
-local panel, cbQuest, cbSoul, cbHearth, cbMini, cbTrade, cbMail, cbAuction, cbSound, cbAuto
-local qSlider, qLabel, customLine, customBox
+local panel, cbQuest, cbQuestLog, cbSoul, cbHearth, cbMini, cbTrade, cbMail, cbAuction, cbSound, cbAuto
+local swatches = {} -- quality chips, index = quality + 1
+local qText, statusText, customInput
 local panelBuilt, panelUpdating = false, false
 local WG_RefreshPanel, WG_SyncMinimap -- forward declarations (used before defined)
 
@@ -652,22 +808,228 @@ local function WG_ApplyAndRefresh()
   WG_RefreshPanel()
 end
 
--- First entries of the custom list for the panel, with names when the
--- client knows them. Full list stays on /wg list (chat text has no limit).
-local function WG_CustomListText()
+-- Hint text shown in the custom-item input box until it gains focus.
+local WG_INPUT_HINT = "Shift-click an item here"
+
+-- Parse an item link, a raw item: link, or a plain number into an item ID.
+local function WG_ParseItemText(text)
+  if type(text) ~= "string" then return nil end
+  text = WG_Trim(text)
+  if text == "" or text == WG_INPUT_HINT then return nil end
+  return tonumber(string.match(text, "item:(%d+)")) or tonumber(text)
+end
+
+-- Custom list entries: shared by the panel buttons and /wg add|remove so
+-- both surfaces enforce the same validation and messages.
+local function WG_AddCustom(id)
+  if not db then Msg("still loading, try again in a moment."); return end
+  if not id or id <= 0 or id ~= math.floor(id) then
+    Msg("usage: /wg add <shift-click link|itemID>")
+    return
+  end
+  db.custom[id] = true
+  Msg("protecting item " .. id .. ".")
+  infoCache[id] = nil
+  WG_ApplyAndRefresh()
+end
+
+local function WG_RemoveCustom(id)
+  if not db then Msg("still loading, try again in a moment."); return end
+  if not id or id <= 0 or id ~= math.floor(id) then
+    Msg("usage: /wg remove <shift-click link|itemID>")
+    return
+  end
+  db.custom[id] = nil
+  Msg("unprotected item " .. id .. ".")
+  infoCache[id] = nil
+  WG_ApplyAndRefresh()
+end
+
+-- Quality color escapes: the client's table when present, else the standard
+-- palette so headless tests and odd clients still color item names.
+local QUALITY_HEX = {
+  "|cff9d9d9d", "|cffffffff", "|cff1eff00",
+  "|cff0070dd", "|cffa335ee", "|cffff8000",
+}
+
+local function WG_QualityHex(q)
+  local c = ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+  if c and c.hex then return c.hex end
+  return QUALITY_HEX[(q or 1) + 1] or "|cffffffff"
+end
+
+local function WG_QualityText(q)
+  return "Protects: " .. WG_QualityHex(q) .. QUALITY_NAMES[q + 1] .. "|r and better"
+end
+
+-- Quality chips: the six quality colors as clickable swatches in the panel.
+-- Fixed RGB values (not the client table) so they render identically everywhere.
+local SWATCH_LABELS = { "Poor", "Common", "Uncommon", "Rare", "Epic", "Legendary" }
+local SWATCH_RGB = {
+  { 0.62, 0.62, 0.62 }, { 1.00, 1.00, 1.00 }, { 0.12, 1.00, 0.00 },
+  { 0.00, 0.44, 0.87 }, { 0.64, 0.21, 0.93 }, { 1.00, 0.50, 0.00 },
+}
+local SWATCH_W, SWATCH_H, SWATCH_GAP = 68, 24, 3
+
+-- The active threshold's chip gets a bright fill and a gold edge; the rest
+-- stay dim in their own quality color so the whole scale still reads.
+local function WG_SyncSwatches(threshold)
+  for i, btn in ipairs(swatches) do
+    local on = (i - 1) == threshold
+    local r, g, b = SWATCH_RGB[i][1], SWATCH_RGB[i][2], SWATCH_RGB[i][3]
+    btn.wgSelected = on
+    btn.wgFill:SetColorTexture(r, g, b, on and 0.55 or 0.10)
+    for _, t in ipairs(btn.wgEdges) do
+      if on then t:SetColorTexture(1, 0.82, 0, 1)
+      else t:SetColorTexture(r, g, b, 0.55) end
+    end
+  end
+end
+
+-- Header status line: what is guarded right now, in one glance.
+local function WG_StatusText()
+  local q = WG_ClampQuality(db.qualityThreshold)
+  local head = "Guarding " .. WG_QualityHex(q) .. SWATCH_LABELS[q + 1] .. "|r+"
+  local extras = {}
+  if db.protectQuest then table.insert(extras, "quest") end
+  if db.protectSoulbound then table.insert(extras, "bound") end
+  if db.protectHearth then table.insert(extras, "hearth") end
+  table.insert(extras, WG_CustomCount() .. " custom")
+  return head .. " - " .. table.concat(extras, ", ")
+end
+
+-- ---------- shared frame dressing (classic WoW dialog style) ----------
+
+-- One spacing system for the whole panel: PAD is the content margin inside
+-- the dialog border, sections breathe more above their header than below,
+-- and the panel height is derived from the layout cursor, never guessed.
+local PAD = 20
+local PANEL_W = 464
+local CHECK_SIZE = 26
+local ROW_PITCH = 30
+local LIST_ROW_H = 24
+local LIST_H = 120
+
+local DIALOG_BACKDROP = {
+  bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+  edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+  tile = true, tileSize = 32, edgeSize = 32,
+  insets = { left = 11, right = 12, top = 12, bottom = 11 },
+}
+local INSET_BACKDROP = {
+  bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true, tileSize = 16, edgeSize = 16,
+  insets = { left = 5, right = 5, top = 5, bottom = 5 },
+}
+
+-- Native stone + border art first; clients without SetBackdrop on plain
+-- frames fall back to the painted color textures below.
+local function WG_Backdrop(frame, def, r, g, b, a)
+  if frame.SetBackdrop then
+    local ok = pcall(frame.SetBackdrop, frame, def)
+    if ok then
+      if r and frame.SetBackdropColor then
+        pcall(frame.SetBackdropColor, frame, r, g, b, a or 1)
+      end
+      return true
+    end
+  end
+  return false
+end
+
+-- Custom item list: a real scroll frame with one row per item (icon,
+-- quality-colored name, remove button), rows recycled across refreshes.
+local customScroll, customChild, customBar, customEmpty, customCount
+local listRows = {}
+
+local function WG_MakeListRow()
+  local row = CreateFrame("Button", nil, customChild)
+  row:SetHeight(LIST_ROW_H)
+  row:RegisterForClicks("LeftButtonUp")
+  if row.SetHighlightTexture then
+    pcall(row.SetHighlightTexture, row, "Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+  end
+  local icon = row:CreateTexture(nil, "ARTWORK")
+  icon:SetWidth(18)
+  icon:SetHeight(18)
+  icon:SetPoint("LEFT", 6, 0)
+  icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+  row.icon = icon
+  local name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  name:SetPoint("LEFT", 30, 0)
+  name:SetJustifyH("LEFT")
+  row.name = name
+  local x = CreateFrame("Button", nil, row)
+  x:SetWidth(16)
+  x:SetHeight(16)
+  x:SetPoint("RIGHT", -6, 0)
+  local xt = x:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  xt:SetPoint("CENTER", 0, 0)
+  xt:SetText("X")
+  xt:SetTextColor(0.75, 0.25, 0.25)
+  x:SetScript("OnEnter", function()
+    xt:SetTextColor(1, 0.4, 0.4)
+    if GameTooltip then
+      GameTooltip:SetOwner(x, "ANCHOR_RIGHT")
+      GameTooltip:SetText("Remove from custom list")
+      GameTooltip:Show()
+    end
+  end)
+  x:SetScript("OnLeave", function()
+    xt:SetTextColor(0.75, 0.25, 0.25)
+    local enter = row.GetScript and row:GetScript("OnEnter")
+    if enter then enter(row) elseif GameTooltip then GameTooltip:Hide() end
+  end)
+  x:SetScript("OnClick", function()
+    if row.id then WG_RemoveCustom(row.id) end
+  end)
+  row:SetScript("OnEnter", function(self)
+    if not (GameTooltip and self.id) then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    pcall(GameTooltip.SetHyperlink, GameTooltip, "item:" .. self.id)
+    GameTooltip:Show()
+  end)
+  row:SetScript("OnLeave", function()
+    if GameTooltip then GameTooltip:Hide() end
+  end)
+  return row
+end
+
+local function WG_RefreshCustomList()
+  if not customChild then return end
   local ids = {}
   if db and type(db.custom) == "table" then
     for id in pairs(db.custom) do table.insert(ids, id) end
   end
   table.sort(ids)
-  if #ids == 0 then return "Custom list is empty.  ( /wg add [Shift-click item] )" end
-  local lines = {}
-  for i = 1, math.min(#ids, 5) do
-    local ok, name = pcall(GetItemInfo, ids[i])
-    table.insert(lines, "- " .. ((ok and name) or ("item:" .. tostring(ids[i]))))
+  for _, row in ipairs(listRows) do row:Hide() end
+  for i, id in ipairs(ids) do
+    local row = listRows[i]
+    if not row then row = WG_MakeListRow(); listRows[i] = row end
+    row.id = id
+    row:SetWidth(customChild:GetWidth())
+    row:SetPoint("TOPLEFT", 0, -(i - 1) * LIST_ROW_H)
+    local ok, name, _, quality, _, _, _, _, _, _, tex = pcall(GetItemInfo, id)
+    if not ok then name, quality, tex = nil, nil, nil end
+    row.icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+    row.name:SetText(WG_QualityHex(quality) .. (name or ("item:" .. id)) .. "|r")
+    row:Show()
   end
-  if #ids > 5 then table.insert(lines, "+ " .. (#ids - 5) .. " more (see /wg list)") end
-  return table.concat(lines, "\n")
+  local viewH = (customScroll.GetHeight and customScroll:GetHeight()) or LIST_H
+  -- Empty list keeps a full-height child so the empty note stays centered.
+  local h = (#ids > 0) and (#ids * LIST_ROW_H) or viewH
+  customChild:SetHeight(h)
+  if customEmpty then
+    if #ids == 0 then customEmpty:Show() else customEmpty:Hide() end
+  end
+  local range = math.max(0, h - viewH)
+  customBar:SetMinMaxValues(0, range)
+  customBar:SetValue(math.min(customBar:GetValue() or 0, range))
+  if range > 0 then customBar:Show() else customBar:Hide() end
+  if customCount then
+    customCount:SetText(#ids .. (#ids == 1 and " item" or " items"))
+  end
 end
 
 function WG_RefreshPanel()
@@ -678,6 +1040,7 @@ function WG_RefreshPanel()
     if cb and cb.SetChecked then pcall(cb.SetChecked, cb, v and true or false) end
   end
   setChecked(cbQuest, db.protectQuest)
+  setChecked(cbQuestLog, db.protectQuestLog)
   setChecked(cbSoul, db.protectSoulbound)
   setChecked(cbHearth, db.protectHearth)
   setChecked(cbTrade, db.protectTrade)
@@ -686,43 +1049,164 @@ function WG_RefreshPanel()
   setChecked(cbAuto, db.autosell)
   setChecked(cbMini, db.minimapShown ~= false)
   setChecked(cbSound, db.warnSound)
-  if qSlider and qSlider.SetValue then pcall(qSlider.SetValue, qSlider, db.qualityThreshold) end
-  if qLabel and qLabel.SetText then
-    qLabel:SetText("Protects: " .. QUALITY_NAMES[db.qualityThreshold + 1] .. " and better")
-  end
-  customLine:SetText("Custom list: " .. WG_CustomCount() .. " items  ( /wg add [Shift-click item] )")
-  customBox:SetText(WG_CustomListText())
+  WG_SyncSwatches(db.qualityThreshold)
+  if qText then qText:SetText(WG_QualityText(db.qualityThreshold)) end
+  if statusText then statusText:SetText(WG_StatusText()) end
+  WG_RefreshCustomList()
   panelUpdating = false
 end
 
-local function WG_MakeCheck(name, label, y, set)
+-- ---------- shared frame dressing (flat dark addon style) ----------
+
+-- Flat 1px outline drawn with color textures: no border art file needed,
+-- so every client renders the same clean edge.
+local function WG_FlatBorder(frame, r, g, b, a)
+  local s = 1
+  local function tex(c1, x1, y1, c2, x2, y2)
+    local t = frame:CreateTexture(nil, "OVERLAY")
+    if not t then return end
+    pcall(t.SetColorTexture, t, r, g, b, a)
+    pcall(t.SetPoint, t, c1, frame, c1, x1, y1)
+    pcall(t.SetPoint, t, c2, frame, c2, x2, y2)
+  end
+  tex("TOPLEFT", s, -s, "TOPRIGHT", -s, -s)      -- top
+  tex("BOTTOMLEFT", s, s, "BOTTOMRIGHT", -s, s)  -- bottom
+  tex("TOPLEFT", s, -s, "BOTTOMLEFT", s, s)      -- left
+  tex("TOPRIGHT", -s, -s, "BOTTOMRIGHT", -s, s)  -- right
+end
+
+-- Paint a flat dark background with a color texture: SetBackdrop is not
+-- available on plain frames in modern clients (they require the
+-- BackdropTemplate mixin), so painting works everywhere.
+local function WG_PaintBg(frame, r, g, b, a)
+  local bg = frame:CreateTexture(nil, "BACKGROUND")
+  if bg then
+    pcall(bg.SetColorTexture, bg, r, g, b, a)
+    pcall(bg.SetAllPoints, bg)
+  end
+end
+
+local function WG_Divider(frame, y, r, g, b, a)
+  local t = frame:CreateTexture(nil, "ARTWORK")
+  if t then
+    pcall(t.SetColorTexture, t, r, g, b, a or 0.5)
+    pcall(t.SetPoint, t, "TOPLEFT", frame, "TOPLEFT", PAD, y)
+    pcall(t.SetPoint, t, "TOPRIGHT", frame, "TOPRIGHT", -PAD, y)
+    pcall(t.SetHeight, t, 1)
+  end
+end
+
+local function WG_SectionHeader(frame, text, y)
+  local fs = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  if fs then
+    pcall(fs.SetPoint, fs, "TOPLEFT", PAD, y)
+    pcall(fs.SetJustifyH, fs, "LEFT")
+    pcall(fs.SetText, fs, text)
+  end
+  return fs
+end
+
+local function WG_MakeCheck(name, label, x, y, set, tip)
   local cb = CreateFrame("CheckButton", name, panel, "UICheckButtonTemplate")
   if not cb then return nil end
-  if cb.SetPoint then cb:SetPoint("TOPLEFT", 20, y) end
+  cb:SetWidth(CHECK_SIZE)
+  cb:SetHeight(CHECK_SIZE)
+  cb:SetPoint("TOPLEFT", x, y)
   local fs = _G[name .. "Text"]
-  if fs and fs.SetText then pcall(fs.SetText, fs, label) end
+  if fs then
+    if fs.SetFontObject then pcall(fs.SetFontObject, fs, "GameFontHighlight") end
+    if fs.ClearAllPoints then pcall(fs.ClearAllPoints, fs) end
+    if fs.SetPoint then pcall(fs.SetPoint, fs, "LEFT", cb, "RIGHT", 4, 0) end
+    if fs.SetJustifyH then pcall(fs.SetJustifyH, fs, "LEFT") end
+    if fs.SetText then pcall(fs.SetText, fs, label) end
+  end
   cb:SetScript("OnClick", function(self)
     if panelUpdating then return end
     set(self:GetChecked() and true or false)
     WG_ApplyAndRefresh()
   end)
+  if tip then
+    cb:SetScript("OnEnter", function(self)
+      if not GameTooltip then return end
+      GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip:SetText(label)
+      GameTooltip:AddLine(tip, 1, 1, 1, true)
+      GameTooltip:Show()
+    end)
+    cb:SetScript("OnLeave", function()
+      if GameTooltip then GameTooltip:Hide() end
+    end)
+  end
   return cb
 end
 
-local function WG_BuildPanel()
-  local ok, frame = pcall(CreateFrame, "Frame", "WhatsGoodPanel", UIParent, "UIPanelDialogTemplate")
-  if not ok or not frame then
-    frame = CreateFrame("Frame", "WhatsGoodPanel", UIParent)
-    pcall(frame.SetBackdrop, frame, {
-      bgFile = "Interface/DialogFrame/UI-DialogBox-Background",
-      edgeFile = "Interface/DialogFrame/UI-DialogBox-Border",
-      tile = true, tileSize = 32, edgeSize = 32,
-      insets = { left = 11, right = 12, top = 12, bottom = 11 },
-    })
+-- Thin quality-colored edge drawn with four color textures. Returned so the
+-- caller can recolor it (the quality chips change their edge on selection).
+local function WG_Edges(frame, thick)
+  local edges = {}
+  local function tex(p1, x1, y1, p2, x2, y2)
+    local t = frame:CreateTexture(nil, "OVERLAY")
+    t:SetPoint(p1, frame, p1, x1, y1)
+    t:SetPoint(p2, frame, p2, x2, y2)
+    table.insert(edges, t)
   end
+  tex("TOPLEFT", 0, 0, "TOPRIGHT", 0, -thick)
+  tex("BOTTOMLEFT", 0, 0, "BOTTOMRIGHT", 0, thick)
+  tex("TOPLEFT", 0, 0, "BOTTOMLEFT", thick, 0)
+  tex("TOPRIGHT", 0, 0, "BOTTOMRIGHT", -thick, 0)
+  return edges
+end
+
+-- One quality chip: clicking it sets the protection threshold to that quality.
+local function WG_MakeSwatch(i, x, y)
+  local q = i - 1
+  local r, g, b = SWATCH_RGB[i][1], SWATCH_RGB[i][2], SWATCH_RGB[i][3]
+  local btn = CreateFrame("Button", "WhatsGoodQuality" .. q, panel)
+  btn:SetWidth(SWATCH_W)
+  btn:SetHeight(SWATCH_H)
+  btn:SetPoint("TOPLEFT", x, y)
+  btn:RegisterForClicks("LeftButtonUp")
+  btn.wgFill = btn:CreateTexture(nil, "BACKGROUND")
+  btn.wgFill:SetAllPoints(btn)
+  btn.wgEdges = WG_Edges(btn, 2)
+  -- White label on every chip: the quality color lives in the edge and fill,
+  -- so the text stays readable on the blue, purple, and grey chips alike.
+  local label = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  label:SetPoint("CENTER", 0, 0)
+  label:SetText(SWATCH_LABELS[i])
+  btn:SetScript("OnClick", function()
+    if panelUpdating then return end
+    db.qualityThreshold = q
+    WG_ApplyAndRefresh()
+  end)
+  btn:SetScript("OnEnter", function(self)
+    if not GameTooltip then return end
+    GameTooltip:SetOwner(self, "ANCHOR_TOP")
+    GameTooltip:SetText(SWATCH_LABELS[i], r, g, b)
+    GameTooltip:AddLine("Protect " .. string.lower(SWATCH_LABELS[i]) .. " items and better.", 1, 1, 1, true)
+    GameTooltip:Show()
+  end)
+  btn:SetScript("OnLeave", function()
+    if GameTooltip then GameTooltip:Hide() end
+  end)
+  return btn
+end
+
+local function WG_BuildPanel()
+  local ok, frame = pcall(CreateFrame, "Frame", "WhatsGoodPanel", UIParent,
+    BackdropTemplateMixin and "BackdropTemplate" or nil)
+  if not ok or not frame then
+    ok, frame = pcall(CreateFrame, "Frame", "WhatsGoodPanel", UIParent)
+  end
+  if not ok or not frame then return end
   panel = frame
-  if panel.SetWidth then panel:SetWidth(360) end
-  if panel.SetHeight then panel:SetHeight(584) end
+  if panel.SetFrameStrata then pcall(panel.SetFrameStrata, panel, "DIALOG") end
+  if panel.SetToplevel then pcall(panel.SetToplevel, panel, true) end
+  panel:SetWidth(PANEL_W)
+  if not WG_Backdrop(panel, DIALOG_BACKDROP) then
+    WG_PaintBg(panel, 0.06, 0.06, 0.08, 0.97)
+    WG_FlatBorder(panel, 0.84, 0.70, 0.33, 0.9)
+  end
   panel:SetPoint("CENTER")
   panel:SetMovable(true)
   panel:EnableMouse(true)
@@ -733,114 +1217,271 @@ local function WG_BuildPanel()
   panel:SetScript("OnShow", WG_RefreshPanel)
   if UISpecialFrames then table.insert(UISpecialFrames, "WhatsGoodPanel") end
 
+  -- Title banner and corner close, like a Blizzard dialog.
+  local banner = panel:CreateTexture(nil, "ARTWORK")
+  banner:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
+  banner:SetWidth(310)
+  banner:SetHeight(68)
+  banner:SetPoint("TOP", 0, 12)
   local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  title:SetPoint("TOPLEFT", 18, -16)
-  title:SetText("WhatsGood " .. VERSION)
+  title:SetPoint("TOP", banner, "TOP", 0, -15)
+  title:SetText("WhatsGood")
+  local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT", -8, -8)
+  close:SetScript("OnClick", function() panel:Hide() end)
 
-  local desc = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  desc:SetPoint("TOPLEFT", 20, -44)
-  desc:SetWidth(320)
+  -- Layout cursor: every block advances y by its own height plus a gap.
+  local y = -68
+
+  -- Header: framed addon icon, one-line pitch, and a live status line that
+  -- answers "what is being guarded right now?" without opening anything.
+  local icon = panel:CreateTexture(nil, "ARTWORK")
+  icon:SetTexture("Interface\\Icons\\INV_Misc_Bag_10")
+  icon:SetWidth(40)
+  icon:SetHeight(40)
+  icon:SetPoint("TOPLEFT", PAD, y)
+  local iconFrame = panel:CreateTexture(nil, "OVERLAY")
+  iconFrame:SetTexture("Interface\\Common\\WhiteIconFrame")
+  iconFrame:SetAllPoints(icon)
+  local version = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  version:SetPoint("TOPRIGHT", -PAD, y)
+  version:SetText("v" .. VERSION)
+  local desc = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  desc:SetPoint("TOPLEFT", PAD + 50, y)
+  desc:SetWidth(PANEL_W - PAD * 2 - 94)
   desc:SetJustifyH("LEFT")
-  desc:SetText("Dims quest and important bag items so they can't be sold, traded, mailed, auctioned, or deleted by accident. Hold Shift to bypass protection.")
+  desc:SetText("Guards quest and valuable items from accidental sale, trade, mail, auction, or deletion.")
+  statusText = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  statusText:SetPoint("TOPLEFT", PAD + 50, y - 36)
+  statusText:SetWidth(PANEL_W - PAD * 2 - 94)
+  statusText:SetJustifyH("LEFT")
+  y = y - 52
 
-  cbQuest = WG_MakeCheck("WhatsGoodCheckQuest", "Protect quest items", -100,
-    function(v) db.protectQuest = v end)
-  cbSoul = WG_MakeCheck("WhatsGoodCheckSoulbound", "Protect bound gear (green+)", -124,
-    function(v) db.protectSoulbound = v end)
-  cbHearth = WG_MakeCheck("WhatsGoodCheckHearth", "Protect Hearthstone", -148,
-    function(v) db.protectHearth = v end)
-  cbTrade = WG_MakeCheck("WhatsGoodCheckTrade", "Protect from trade", -172,
-    function(v) db.protectTrade = v end)
-  cbMail = WG_MakeCheck("WhatsGoodCheckMail", "Protect from mail", -196,
-    function(v) db.protectMail = v end)
-  cbAuction = WG_MakeCheck("WhatsGoodCheckAuction", "Protect from auction", -220,
-    function(v) db.protectAuction = v end)
-  cbAuto = WG_MakeCheck("WhatsGoodCheckAutosell", "Auto-sell junk at vendor", -244,
-    function(v) db.autosell = v end)
-  cbMini = WG_MakeCheck("WhatsGoodCheckMinimap", "Show minimap button", -268,
-    function(v) db.minimapShown = v; WG_SyncMinimap() end)
-  cbSound = WG_MakeCheck("WhatsGoodCheckSound", "Play sound on blocked action", -292,
-    function(v) db.warnSound = v end)
+  local function divider()
+    y = y - 14
+    WG_Divider(panel, y, 0.84, 0.70, 0.33, 0.35)
+  end
+  local function section(text)
+    y = y - 10
+    WG_SectionHeader(panel, text, y)
+    y = y - 20
+  end
 
-  qSlider = CreateFrame("Slider", "WhatsGoodQualitySlider", panel, "OptionsSliderTemplate")
-  if qSlider == nil then return end
-  qSlider:SetPoint("TOPLEFT", 20, -342)
-  qSlider:SetWidth(316)
-  qSlider:SetMinMaxValues(0, 5)
-  qSlider:SetValueStep(1)
-  if qSlider.SetObeyStepOnDrag then qSlider:SetObeyStepOnDrag(true) end
-  local slow = _G["WhatsGoodQualitySliderLow"]
-  if slow and slow.SetText then slow:SetText("Grey") end
-  local shigh = _G["WhatsGoodQualitySliderHigh"]
-  if shigh and shigh.SetText then shigh:SetText("Legend.") end
-  local stext = _G["WhatsGoodQualitySliderText"]
-  if stext and stext.SetText then stext:SetText("Minimum quality") end
-  qSlider:SetScript("OnValueChanged", function(_, value)
-    value = WG_ClampQuality(value)
-    if qLabel and qLabel.SetText then
-      qLabel:SetText("Protects: " .. QUALITY_NAMES[value + 1] .. " and better")
-    end
-    if panelUpdating then return end
-    if value ~= db.qualityThreshold then
-      db.qualityThreshold = value
-      WG_ApplyAndRefresh()
-    end
+  -- Quality threshold: six chips in the game's own quality colors.
+  divider()
+  section("Quality threshold")
+  local swY = y
+  for i = 1, 6 do
+    local x = PAD + (i - 1) * (SWATCH_W + SWATCH_GAP)
+    swatches[i] = WG_MakeSwatch(i, x, swY)
+  end
+  y = swY - SWATCH_H - 8
+  qText = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  qText:SetPoint("TOPLEFT", PAD, y)
+  qText:SetWidth(PANEL_W - PAD * 2)
+  qText:SetJustifyH("LEFT")
+  y = y - 20
+
+  -- Protection: the six guards in two columns.
+  divider()
+  section("Protection")
+  local grid = y
+  cbQuest = WG_MakeCheck("WhatsGoodCheckQuest", "Quest items", PAD, grid,
+    function(v) db.protectQuest = v end,
+    "Quest items and quest starters are never sold, traded, mailed, auctioned, or deleted.")
+  cbTrade = WG_MakeCheck("WhatsGoodCheckTrade", "From trade", PAD + 212, grid,
+    function(v) db.protectTrade = v end,
+    "Block placing protected items into the trade window.")
+  cbSoul = WG_MakeCheck("WhatsGoodCheckSoulbound", "Bound gear (green+)", PAD, grid - ROW_PITCH,
+    function(v) db.protectSoulbound = v end,
+    "Soulbound and bind-on-pickup/equip items of Uncommon quality or better are guarded.")
+  cbMail = WG_MakeCheck("WhatsGoodCheckMail", "From mail", PAD + 212, grid - ROW_PITCH,
+    function(v) db.protectMail = v end,
+    "Block attaching protected items to mail.")
+  cbHearth = WG_MakeCheck("WhatsGoodCheckHearth", "Hearthstone", PAD, grid - ROW_PITCH * 2,
+    function(v) db.protectHearth = v end,
+    "Your hearthstone and its variants stay protected.")
+  cbAuction = WG_MakeCheck("WhatsGoodCheckAuction", "From auction", PAD + 212, grid - ROW_PITCH * 2,
+    function(v) db.protectAuction = v end,
+    "Block listing protected items on the auction house.")
+  y = grid - ROW_PITCH * 3 + (ROW_PITCH - CHECK_SIZE)
+  local hint = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  hint:SetPoint("TOPLEFT", PAD, y - 6)
+  hint:SetText("Hold Shift to bypass any block.")
+  y = y - 16
+
+  -- Options: behavior toggles.
+  divider()
+  section("Options")
+  grid = y
+  cbAuto = WG_MakeCheck("WhatsGoodCheckAutosell", "Auto-sell junk", PAD, grid,
+    function(v) db.autosell = v end,
+    "Automatically sell unprotected grey items when a merchant window opens.")
+  cbSound = WG_MakeCheck("WhatsGoodCheckSound", "Sound on block", PAD + 212, grid,
+    function(v) db.warnSound = v end,
+    "Play a sound whenever an action is blocked.")
+  cbMini = WG_MakeCheck("WhatsGoodCheckMinimap", "Minimap button", PAD, grid - ROW_PITCH,
+    function(v) db.minimapShown = v; WG_SyncMinimap() end,
+    "Show the WhatsGood button around the minimap.")
+  cbQuestLog = WG_MakeCheck("WhatsGoodCheckQuestLog", "Quest-log items", PAD + 212, grid - ROW_PITCH,
+    function(v) db.protectQuestLog = v end,
+    "Items your active quests need are protected as soon as they appear in your bags.")
+  y = grid - ROW_PITCH * 2 + (ROW_PITCH - CHECK_SIZE)
+
+  -- Custom items: scrolling list with icons, tooltips, and per-row remove.
+  divider()
+  y = y - 10
+  WG_SectionHeader(panel, "Custom Items", y)
+  customCount = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  customCount:SetPoint("TOPRIGHT", -PAD, y)
+  y = y - 20
+
+  local inset = CreateFrame("Frame", "WhatsGoodCustomInset", panel)
+  inset:SetPoint("TOPLEFT", PAD, y)
+  inset:SetWidth(PANEL_W - PAD * 2)
+  inset:SetHeight(LIST_H)
+  if not WG_Backdrop(inset, INSET_BACKDROP, 1, 1, 1, 0.9) then
+    WG_PaintBg(inset, 0, 0, 0, 0.55)
+    WG_FlatBorder(inset, 0.25, 0.25, 0.25, 0.9)
+  end
+  customScroll = CreateFrame("ScrollFrame", "WhatsGoodCustomScroll", inset)
+  customScroll:SetPoint("TOPLEFT", 5, -5)
+  customScroll:SetPoint("BOTTOMRIGHT", -31, 5)
+  customChild = CreateFrame("Frame", "WhatsGoodCustomChild", customScroll)
+  customChild:SetWidth(PANEL_W - PAD * 2 - 36)
+  customChild:SetHeight(1)
+  customScroll:SetScrollChild(customChild)
+  customBar = CreateFrame("Slider", "WhatsGoodCustomScrollBar", customScroll,
+    "UIPanelScrollBarTemplate")
+  customBar:SetPoint("TOPLEFT", customScroll, "TOPRIGHT", 2, -16)
+  customBar:SetPoint("BOTTOMLEFT", customScroll, "BOTTOMRIGHT", 2, 16)
+  customBar:SetScript("OnValueChanged", function(_, value)
+    customScroll:SetVerticalScroll(value)
   end)
+  customScroll:SetScript("OnVerticalScroll", function(_, offset)
+    customBar:SetValue(offset)
+  end)
+  pcall(customScroll.EnableMouseWheel, customScroll, true)
+  pcall(customScroll.SetScript, customScroll, "OnMouseWheel", function(_, delta)
+    local _, maxV = customBar:GetMinMaxValues()
+    customBar:SetValue(math.max(0, math.min(customBar:GetValue() - delta * LIST_ROW_H, maxV)))
+  end)
+  customEmpty = customChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  customEmpty:SetPoint("CENTER", customChild, "CENTER", 0, 0)
+  customEmpty:SetJustifyH("CENTER")
+  customEmpty:SetText("No custom items yet.\nShift-click an item into the box below.")
+  y = y - LIST_H - 10
 
-  qLabel = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  qLabel:SetPoint("TOPLEFT", 20, -386)
-  qLabel:SetWidth(320)
-  qLabel:SetJustifyH("LEFT")
+  -- Input row: shift-click box plus Add / Remove, same validation as /wg.
+  local okInput, input = pcall(CreateFrame, "EditBox", "WhatsGoodCustomInput",
+    panel, "InputBoxTemplate")
+  if not okInput or not input then
+    okInput, input = pcall(CreateFrame, "EditBox", "WhatsGoodCustomInput", panel)
+  end
+  if okInput and input then
+    customInput = input
+    input:SetWidth(252)
+    input:SetHeight(26)
+    input:SetPoint("TOPLEFT", PAD, y)
+    if input.SetFontObject then pcall(input.SetFontObject, input, "GameFontHighlightSmall") end
+    pcall(input.SetAutoFocus, input, false)
+    input:SetScript("OnEnterPressed", function(self)
+      local id = WG_ParseItemText(self:GetText())
+      if id then WG_AddCustom(id) end
+      pcall(self.SetText, self, WG_INPUT_HINT)
+      pcall(self.ClearFocus, self)
+    end)
+    input:SetScript("OnEscapePressed", function(self)
+      pcall(self.ClearFocus, self)
+    end)
+    input:SetScript("OnEditFocusGained", function(self)
+      if (self:GetText() or "") == WG_INPUT_HINT then self:SetText("") end
+    end)
+    input:SetScript("OnEditFocusLost", function(self)
+      if (self:GetText() or "") == "" then self:SetText(WG_INPUT_HINT) end
+    end)
+    pcall(input.SetText, input, WG_INPUT_HINT)
+  end
 
-  customLine = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-  customLine:SetPoint("TOPLEFT", 20, -410)
-  customLine:SetWidth(320)
-  customLine:SetJustifyH("LEFT")
+  local function WG_ItemFromInput()
+    if not customInput then return nil end
+    local id = WG_ParseItemText(customInput.GetText and customInput:GetText() or nil)
+    pcall(customInput.SetText, customInput, WG_INPUT_HINT)
+    pcall(customInput.ClearFocus, customInput)
+    return id
+  end
 
-  customBox = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  customBox:SetPoint("TOPLEFT", 20, -434)
-  customBox:SetWidth(320)
-  customBox:SetJustifyH("LEFT")
+  local addBtn = CreateFrame("Button", "WhatsGoodAddButton", panel, "UIPanelButtonTemplate")
+  if addBtn then
+    addBtn:SetWidth(78)
+    addBtn:SetHeight(24)
+    addBtn:SetPoint("TOPLEFT", PAD + 260, y - 1)
+    addBtn:SetText("Add")
+    addBtn:SetScript("OnClick", function()
+      local id = WG_ItemFromInput()
+      if id then WG_AddCustom(id) end
+    end)
+  end
 
+  local removeBtn = CreateFrame("Button", "WhatsGoodRemoveButton", panel, "UIPanelButtonTemplate")
+  if removeBtn then
+    removeBtn:SetWidth(78)
+    removeBtn:SetHeight(24)
+    removeBtn:SetPoint("TOPLEFT", PAD + 346, y - 1)
+    removeBtn:SetText("Remove")
+    removeBtn:SetScript("OnClick", function()
+      local id = WG_ItemFromInput()
+      if id then WG_RemoveCustom(id) end
+    end)
+  end
+  y = y - 26 - 16
+
+  -- Footer: height derives from the cursor, so nothing ever overlaps.
+  local footerH = 24
+  panel:SetHeight(-y + footerH + 18)
   local junk = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-  junk:SetWidth(96)
-  junk:SetHeight(24)
-  junk:SetPoint("BOTTOMLEFT", 16, 16)
+  junk:SetWidth(110)
+  junk:SetHeight(footerH)
+  junk:SetPoint("BOTTOMLEFT", PAD, 18)
   junk:SetText("Sell Junk")
   junk:SetScript("OnClick", function() WG_SellJunk() end)
 
   local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-  reset:SetWidth(96)
-  reset:SetHeight(24)
-  reset:SetPoint("BOTTOM", 0, 16)
+  reset:SetWidth(110)
+  reset:SetHeight(footerH)
+  reset:SetPoint("BOTTOM", 0, 18)
   reset:SetText("Reset")
   reset:SetScript("OnClick", function() WG_ResetDB() end)
 
-  local close = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-  close:SetWidth(96)
-  close:SetHeight(24)
-  close:SetPoint("BOTTOMRIGHT", -16, 16)
-  close:SetText("Close")
-  close:SetScript("OnClick", function() panel:Hide() end)
-
-  local dlgClose = _G["WhatsGoodPanelClose"]
-  if dlgClose and dlgClose.SetScript then
-    dlgClose:SetScript("OnClick", function() panel:Hide() end)
-  end
+  local closeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+  closeBtn:SetWidth(110)
+  closeBtn:SetHeight(footerH)
+  closeBtn:SetPoint("BOTTOMRIGHT", -PAD, 18)
+  closeBtn:SetText("Close")
+  closeBtn:SetScript("OnClick", function() panel:Hide() end)
 
   panelBuilt = true
+  panel:Hide() -- deterministic first open: /wg always shows a fresh panel
   WG_RefreshPanel()
 end
 
 local function WG_TogglePanel()
   if not db then return end
-  if not panelBuilt then WG_BuildPanel() end
+  if not panelBuilt then
+    local ok, err = pcall(WG_BuildPanel)
+    if not ok or not panel then
+      Msg("settings panel failed to build: " .. tostring(err))
+      return
+    end
+  end
   if panel:IsShown() then panel:Hide() else panel:Show() end
 end
 
 -- ---------- minimap button ----------
 
 local mmBtn = nil
+-- Addon-folder path: the folder name must stay "WhatsGood" to match.
+local WG_MINIMAP_ICON = "Interface\\AddOns\\WhatsGood\\Media\\WhatsGoodMinimap.tga"
 
 local function WG_MinimapReposition()
   if not mmBtn then return end
@@ -852,6 +1493,7 @@ local function WG_MinimapReposition()
 end
 
 local function WG_MinimapDragUpdate()
+  if not db then return end
   if type(Minimap) ~= "table" or type(Minimap.GetCenter) ~= "function" then return end
   if type(GetCursorPosition) ~= "function" then return end
   if not (UIParent and UIParent.GetEffectiveScale) then return end
@@ -885,20 +1527,26 @@ local function WG_BuildMinimapButton()
   if mmBtn then return end
   if type(Minimap) ~= "table" then return end
   local btn = CreateFrame("Button", "WhatsGoodMinimapButton", Minimap)
-  btn:SetWidth(32)
-  btn:SetHeight(32)
-  btn:SetNormalTexture("Interface\\Icons\\INV_Misc_Bag_10")
+  btn:SetWidth(31)
+  btn:SetHeight(31)
+  -- Custom round badge (gold rim, leather bag, gold coin) drawn by
+  -- Media/WhatsGoodMinimap.tga. The art carries its own rim, so no
+  -- Blizzard tracking ring is layered on top.
+  local icon = btn:CreateTexture(nil, "BACKGROUND")
+  icon:SetTexture(WG_MINIMAP_ICON)
+  icon:SetWidth(28)
+  icon:SetHeight(28)
+  icon:SetPoint("CENTER", 0, 0)
   btn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
-  local ring = btn:CreateTexture(nil, "OVERLAY")
-  ring:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-  ring:SetWidth(54)
-  ring:SetHeight(54)
-  ring:SetPoint("CENTER")
   btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   btn:RegisterForDrag("LeftButton")
   btn:SetScript("OnDragStart", function()
+    if type(GetCursorPosition) ~= "function" then return end
+    if type(UIParent) ~= "table" or type(UIParent.GetEffectiveScale) ~= "function" then return end
     local cx, cy = GetCursorPosition()
+    if not cx or not cy then return end
     local s = UIParent:GetEffectiveScale()
+    if not s or s == 0 then return end
     btn._sx, btn._sy, btn._moved = cx / s, cy / s, nil
     btn:SetScript("OnUpdate", WG_MinimapDragUpdate)
   end)
@@ -907,6 +1555,7 @@ local function WG_BuildMinimapButton()
   end)
   btn:SetScript("OnClick", function(_, mouseBtn)
     if btn._moved then btn._moved = nil; return end
+    if not db then return end
     if mouseBtn == "RightButton" then
       db.protectQuest = not db.protectQuest
       WG_ApplyAndRefresh()
@@ -916,6 +1565,8 @@ local function WG_BuildMinimapButton()
     end
   end)
   btn:SetScript("OnEnter", function()
+    if not db then return end
+    if not GameTooltip then return end
     GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
     GameTooltip:SetText("WhatsGood")
     GameTooltip:AddLine("Click: open settings", 1, 1, 1)
@@ -999,11 +1650,7 @@ function WG_SellJunk()
   if type(sell) ~= "function" then Msg("selling is not available here."); return end
   local n = 0
   for bag = 0, (NUM_BAG_SLOTS or 4) do
-    local slots = 0
-    if type(GetContainerNumSlots) == "function" then
-      local ok, count = pcall(GetContainerNumSlots, bag)
-      if ok and type(count) == "number" then slots = count end
-    end
+    local slots = WG_GetNumSlots(bag)
     for slot = 1, slots do
       if WG_IsJunkSlot(bag, slot) then
         local okS = pcall(sell, bag, slot)
@@ -1022,11 +1669,7 @@ local function WG_Audit()
   local seen, order = {}, {}
   local total, nunprot = 0, 0
   for bag = 0, (NUM_BAG_SLOTS or 4) do
-    local slots = 0
-    if type(GetContainerNumSlots) == "function" then
-      local ok, count = pcall(GetContainerNumSlots, bag)
-      if ok and type(count) == "number" then slots = count end
-    end
+    local slots = WG_GetNumSlots(bag)
     for slot = 1, slots do
       local link = WG_GetLink(bag, slot)
       if link then
@@ -1070,7 +1713,7 @@ local function WG_HandleSlash(input)
   rest = WG_Trim(rest)
   if cmd == "" then WG_TogglePanel(); return end
   if cmd == "help" then
-    Msg("/wg opens settings. threshold 0-5 | quest|soulbound|hearth|trade|mail|auction|autosell|minimap|sound on|off | add <link|id> | remove <link|id> | list | audit | selljunk | reset | refresh | status")
+    Msg("/wg opens settings. threshold 0-5 | quest|questlog|soulbound|hearth|trade|mail|auction|autosell|minimap|sound on|off | add <link|id> | remove <link|id> | list | audit | selljunk | reset | refresh | status")
     return
   end
   if cmd == "status" then WG_Status(); return end
@@ -1090,7 +1733,8 @@ local function WG_HandleSlash(input)
     return
   end
   if cmd == "quest" or cmd == "soulbound" or cmd == "hearth" or cmd == "minimap"
-    or cmd == "trade" or cmd == "mail" or cmd == "auction" or cmd == "autosell" or cmd == "sound" then
+    or cmd == "trade" or cmd == "mail" or cmd == "auction" or cmd == "autosell" or cmd == "sound"
+    or cmd == "questlog" then
     local key = cmd == "quest" and "protectQuest"
       or cmd == "soulbound" and "protectSoulbound"
       or cmd == "hearth" and "protectHearth"
@@ -1099,6 +1743,7 @@ local function WG_HandleSlash(input)
       or cmd == "auction" and "protectAuction"
       or cmd == "autosell" and "autosell"
       or cmd == "sound" and "warnSound"
+      or cmd == "questlog" and "protectQuestLog"
       or "minimapShown"
     if rest == "on" then db[key] = true
     elseif rest == "off" then db[key] = false
@@ -1120,20 +1765,8 @@ local function WG_HandleSlash(input)
     return
   end
   if cmd == "add" or cmd == "remove" then
-    local id = tonumber(string.match(rest, "item:(%d+)")) or tonumber(rest)
-    if not id or id <= 0 or id ~= math.floor(id) then
-      Msg("usage: /wg " .. cmd .. " <shift-click link|itemID>")
-      return
-    end
-    if cmd == "add" then
-      db.custom[id] = true
-      Msg("protecting item " .. id .. ".")
-    else
-      db.custom[id] = nil
-      Msg("unprotected item " .. id .. ".")
-    end
-    infoCache[id] = nil
-    WG_ApplyAndRefresh()
+    local id = WG_ParseItemText(rest)
+    if cmd == "add" then WG_AddCustom(id) else WG_RemoveCustom(id) end
     return
   end
   if cmd == "list" then
@@ -1147,6 +1780,54 @@ local function WG_HandleSlash(input)
     return
   end
   Msg("unknown command. /wg help")
+end
+
+-- ---------- quest-log item memory ----------
+-- The quest log names the special items its quests need (starter kits, quest
+-- tools). Matching is by item name, since the log gives names rather than
+-- links. A bag item whose name matches is learned, so it is protected on
+-- first sight and stays protected after the quest ends (like tooltip learning).
+-- Fails open: clients without the quest-log API just learn nothing new.
+
+local function WG_QuestLogItemNames()
+  local names = {}
+  local okN, n = false, nil
+  if C_QuestLog and type(C_QuestLog.GetNumQuestLogEntries) == "function" then
+    okN, n = pcall(C_QuestLog.GetNumQuestLogEntries)
+  end
+  if not (okN and type(n) == "number") and type(GetNumQuestLogEntries) == "function" then
+    okN, n = pcall(GetNumQuestLogEntries)
+  end
+  if not (okN and type(n) == "number") or type(GetQuestLogSpecialItemInfo) ~= "function" then
+    return names
+  end
+  for i = 1, n do
+    local ok, name = pcall(GetQuestLogSpecialItemInfo, i)
+    if ok and type(name) == "string" and name ~= "" then names[name] = true end
+  end
+  return names
+end
+
+-- Returns how many items were newly learned this pass.
+local function WG_SyncQuestLog()
+  if not db or not db.protectQuestLog or type(db.learned) ~= "table" then return 0 end
+  local names = WG_QuestLogItemNames()
+  if next(names) == nil then return 0 end
+  local added = 0
+  for bag = 0, (NUM_BAG_SLOTS or 4) do
+    for slot = 1, WG_GetNumSlots(bag) do
+      local link = WG_GetLink(bag, slot)
+      local id = link and WG_ItemID(link)
+      if id and not db.learned[id] then
+        local okI, name = pcall(GetItemInfo, link)
+        if okI and type(name) == "string" and names[name] then
+          db.learned[id] = true
+          added = added + 1
+        end
+      end
+    end
+  end
+  return added
 end
 
 -- ---------- events ----------
@@ -1180,14 +1861,14 @@ local function WG_SanitizeDB()
   if type(db.minimapAngle) ~= "number" then db.minimapAngle = 215 end
   for _, k in ipairs({ "protectQuest", "protectSoulbound", "protectHearth",
     "protectTrade", "protectMail", "protectAuction", "autosell",
-    "warnSound", "minimapShown" }) do
+    "warnSound", "minimapShown", "protectQuestLog" }) do
     if type(db[k]) ~= "boolean" then db[k] = DEFAULTS[k] end
   end
 end
 
 WG:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON then
-    WhatsGoodDB = WhatsGoodDB or {}
+    if type(WhatsGoodDB) ~= "table" then WhatsGoodDB = {} end
     db = WhatsGoodDB
     WG_SanitizeDB()
     WG_BuildScanTip()
@@ -1201,6 +1882,7 @@ WG:SetScript("OnEvent", function(_, event, arg1)
       pcall(hooksecurefunc, ContainerFrameCombinedBags, "Update", function() WG_QueueUpdate() end)
     end
   elseif event == "PLAYER_LOGIN" then
+    pcall(WG_SyncQuestLog)
     WG_QueueUpdate()
     Msg("WhatsGood " .. VERSION .. " loaded. Protected items are dimmed (see /wg). Hold Shift to force sell/delete.")
   elseif event == "BAG_UPDATE" or event == "BAG_UPDATE_DELAYED"
@@ -1210,7 +1892,15 @@ WG:SetScript("OnEvent", function(_, event, arg1)
     -- its info (and tooltip lines) should resolve.
     if event == "GET_ITEM_INFO_RECEIVED" and type(arg1) == "number" then
       infoCache[arg1] = nil
+      -- Item names in the open custom list resolve as soon as info arrives.
+      if panelBuilt and panel and panel.IsShown and panel:IsShown() then
+        pcall(WG_RefreshPanel)
+      end
     end
+    pcall(WG_SyncQuestLog)
+    WG_QueueUpdate()
+  elseif event == "QUEST_LOG_UPDATE" then
+    pcall(WG_SyncQuestLog)
     WG_QueueUpdate()
   elseif event == "MERCHANT_SHOW" then
     WG_QueueUpdate()
@@ -1226,6 +1916,7 @@ WG:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 WG:RegisterEvent("MERCHANT_SHOW")
 pcall(WG.RegisterEvent, WG, "BAG_UPDATE_DELAYED")
 pcall(WG.RegisterEvent, WG, "GET_ITEM_INFO_RECEIVED")
+pcall(WG.RegisterEvent, WG, "QUEST_LOG_UPDATE")
 
 SLASH_WHATSGOOD1 = "/whatsgood"
 SLASH_WHATSGOOD2 = "/wg"
