@@ -75,10 +75,10 @@ Settings persist per account in the `WhatsGoodDB` SavedVariable.
 
 ## Files
 
-- `WhatsGood.toc` — addon manifest (`Interface: 16001`, version `1.6.0`)
+- `WhatsGood.toc` — addon manifest (`Interface: 16001`, version `1.7.0`)
 - `WhatsGood.lua` — all logic (classification, dimming, sell/delete/trade/mail/auction guards, panel, minimap button, slash commands)
 - `Media/WhatsGoodMinimap.tga` — 64x64 minimap badge art (generated; loaded by path, so keep the folder named `WhatsGood`)
-- `tests/run.lua` — headless stub-harness tests (`lua tests/run.lua`, no client needed, 115 checks)
+- `tests/run.lua` — headless stub-harness tests (`lua tests/run.lua`, no client needed, 127 checks)
 - Public API for other addons/skins: `WhatsGood_IsProtected(bag, slot)`, `WhatsGood_Reason(bag, slot)`, `WhatsGood_IsProtectedID(itemID, link)` — all fail-safe (never error)
 - `.github/workflows/ci.yml` — syntax check + tests on Lua 5.1
 - `CHANGELOG.md` — release notes

@@ -2,7 +2,7 @@
 
 All notable changes to WhatsGood are documented here.
 
-## [Unreleased]
+## [1.7.0] - 2026-11-12
 
 - Drag-to-add: drop an item from your bags onto the Custom Items list to
   protect it. Dropping onto a row or the empty area both count, and the

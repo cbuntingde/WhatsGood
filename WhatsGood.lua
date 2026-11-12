@@ -5,7 +5,7 @@
 local ADDON = ...
 if type(ADDON) ~= "string" then ADDON = "WhatsGood" end
 
-local VERSION = "1.6.0"
+local VERSION = "1.7.0"
 
 -- Classic Hearthstone plus room for future stones (matched by ID or name).
 local HEARTHSTONE_IDS = { [6948] = true } -- extend here for future stones
