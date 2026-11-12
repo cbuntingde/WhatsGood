@@ -52,7 +52,7 @@ Junk (quality `0`) is never protected unless it is a quest item (with quest prot
 - `/wg reset` — restore all settings to defaults (clears the custom list, keeps learned quest items)
 - `/wg refresh` — re-dim all bags
 
-Settings panel (`/wg`) is a classic WoW dialog: stone background and gold border, title banner, corner close button, six quality chips in the game's own colors (the active one lit, with a live "Guarding ..." status line in the header), two-column protection and options toggles with hover explanations, a scrolling custom-item list (icons, quality-colored names, item tooltips, per-row remove), and a shift-click input box with Add / Remove, plus Sell Junk / Reset / Close (draggable, `Esc` closes). Corrupt settings are sanitized on load.
+Settings panel (`/wg`) is a classic WoW dialog: stone background and gold border, title banner, corner close button, six quality chips in the game's own colors (the active one lit, with a live "Guarding ..." status line in the header), two-column protection and options toggles with hover explanations, a scrolling custom-item list (icons, quality-colored names, item tooltips, per-row remove; drag a bag item onto the list to protect it), and a shift-click input box with Add / Remove, plus Sell Junk / Reset / Close (draggable, `Esc` closes). Corrupt settings are sanitized on load.
 
 Minimap button: a custom round badge (gold rim, leather bag, gold coin; `Media/WhatsGoodMinimap.tga`). Left-click opens settings, right-click toggles quest protection, drag to reposition. Angle is saved in `WhatsGoodDB.minimapAngle`.
 

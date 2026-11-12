@@ -762,6 +762,30 @@ check(_G.WhatsGoodDB.custom[5002] == true, "Add button adds from the input")
 input:SetText("5002")
 _G.WhatsGoodRemoveButton.scripts.OnClick()
 check(_G.WhatsGoodDB.custom[5002] == nil, "Remove button removes from the input")
+
+-- Drag-to-add: an item dropped on the list is protected, and the cursor is
+-- cleared so the item returns to its bag slot.
+_G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = true, "item", 6001, "item:6001"
+scroll.scripts.OnReceiveDrag(scroll)
+check(_G.WhatsGoodDB.custom[6001] == true, "dropping a bag item on the list protects it")
+check(_G._CURSOR == false, "drop clears the cursor")
+-- A click while holding an item counts as a drop (OnMouseUp path); the id
+-- falls back to the link when the cursor reports no numeric id.
+_G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = true, "item", nil, "item:6002"
+child.scripts.OnMouseUp(child)
+check(_G.WhatsGoodDB.custom[6002] == true, "click with an item on the cursor protects it")
+check(_G._CURSOR == false, "click drop clears the cursor")
+-- Non-item cursor contents are ignored and left alone.
+_G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = true, "money", 50, nil
+scroll.scripts.OnReceiveDrag(scroll)
+check(_G._CURSOR == true, "dropping money on the list leaves the cursor alone")
+_G._CURSOR = false
+-- A row accepts drops too (rows capture the mouse above the scroll frame).
+_G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = true, "item", 6003, "item:6003"
+local dropRow = visibleRows()[1]
+dropRow.scripts.OnReceiveDrag(dropRow)
+check(_G.WhatsGoodDB.custom[6003] == true, "dropping an item on a list row protects it")
+_G._CURSOR = false
 for i = 1, 8 do wg("add " .. (7000 + i)) end
 check(bar.shown == true and bar.max > 0, "scrollbar appears when the list overflows")
 bar.scripts.OnValueChanged(bar, 24)
