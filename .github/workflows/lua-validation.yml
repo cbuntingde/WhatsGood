@@ -1,0 +1,55 @@
+name: Lua validation
+
+on:
+  push:
+    branches: [main, "feature/**", "fix/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lua-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lua-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes lua5.1 zip unzip
+      - name: Validate Lua 5.1 syntax
+        run: luac5.1 -p WhatsGood.lua tests/run.lua
+      - name: Run pure Lua regression tests
+        run: lua5.1 tests/run.lua
+      - name: Build clean addon package
+        run: |
+          mkdir -p dist/WhatsGood
+          cp ./*.lua ./*.toc dist/WhatsGood/
+          if [ -d Media ]; then
+            cp -r Media dist/WhatsGood/
+          fi
+          cd dist
+          zip -r WhatsGood.zip WhatsGood
+      - name: Verify package contents
+        run: |
+          unzip -l dist/WhatsGood.zip
+          unzip -Z1 dist/WhatsGood.zip | grep -q '^WhatsGood/WhatsGood.toc$'
+          unzip -Z1 dist/WhatsGood.zip | grep -q '^WhatsGood/WhatsGood.lua$'
+          unzip -Z1 dist/WhatsGood.zip | grep -q '^WhatsGood/Media/WhatsGoodMinimap.tga$'
+          if unzip -Z1 dist/WhatsGood.zip | grep -Eq '(^|/)(tests|docs|\.github)/'; then
+            echo "Development-only files were included in the addon package."
+            exit 1
+          fi
+      - name: Upload addon package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhatsGood-addon
+          path: dist/WhatsGood.zip
+          if-no-files-found: error

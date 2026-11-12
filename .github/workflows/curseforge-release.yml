@@ -1,0 +1,109 @@
+name: CurseForge release
+
+# Uploads the addon to CurseForge every time a GitHub release is published.
+# No plugin or MCP server needed: the runner POSTs the zip straight to the
+# CurseForge Upload API.
+#
+# One-time setup (owner only, never commit secrets):
+#   1. Add the CurseForge API token as an Actions secret named
+#      CURSEFORGE_API_TOKEN (repo Settings > Secrets > Actions), or run:
+#        gh secret set CURSEFORGE_API_TOKEN --body 'paste-token-here'
+#   2. Nothing else: project 1799776 and game version 17053 (= 1.60.1,
+#      WoW Forever) are pinned below. If CurseForge ever lists a newer
+#      Forever build, re-resolve the id with an authenticated GET to
+#      https://wow.curseforge.com/api/game/versions and match name "1.60.x".
+#
+# Test/backfill: run manually with workflow_dispatch and the existing tag
+# (e.g. v1.7.0, released before this workflow existed). The name, notes,
+# and pre-release flag are read back from that GitHub release.
+# Retry: if the upload step fails, use "Re-run failed jobs" on the run.
+# A GitHub pre-release uploads as CurseForge type "beta", else "release".
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to upload (e.g. v1.7.0)"
+        required: true
+        default: "v1.7.0"
+
+permissions:
+  contents: read
+
+jobs:
+  upload-curseforge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Build clean addon package
+        env:
+          TRIGGER: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${TRIGGER}" = "release" ]; then
+            ref="${GITHUB_REF_NAME}"
+          else
+            ref="${INPUT_TAG:?workflow_dispatch requires the 'tag' input}"
+          fi
+          version="${ref#v}"
+          mkdir -p dist/WhatsGood
+          cp ./*.lua ./*.toc dist/WhatsGood/
+          if [ -d Media ]; then
+            cp -r Media dist/WhatsGood/
+          fi
+          cd dist
+          zip -r "WhatsGood-${version}.zip" WhatsGood
+          unzip -Z1 "WhatsGood-${version}.zip" | grep -q '^WhatsGood/WhatsGood.toc$'
+          echo "ZIP=dist/WhatsGood-${version}.zip" >> "$GITHUB_ENV"
+      - name: Upload to CurseForge
+        env:
+          CF_API_TOKEN: ${{ secrets.CURSEFORGE_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_API_TOKEN:-}" ]; then
+            echo "CURSEFORGE_API_TOKEN secret is not set. Add it under repo Settings > Secrets > Actions." >&2
+            exit 1
+          fi
+          if [ "${TRIGGER}" = "release" ]; then
+            name="${RELEASE_NAME:-${GITHUB_REF_NAME}}"
+            body="${RELEASE_BODY:-}"
+            prerelease="${RELEASE_PRERELEASE:-false}"
+          else
+            tag="${INPUT_TAG:?workflow_dispatch requires the 'tag' input}"
+            release_json="$(gh release view "$tag" --json name,body,isPrerelease)"
+            name="$(jq -r '.name // empty' <<<"$release_json")"
+            body="$(jq -r '.body // empty' <<<"$release_json")"
+            prerelease="$(jq -r '.isPrerelease // false' <<<"$release_json")"
+            [ -n "$name" ] || name="$tag"
+          fi
+          if [ "$prerelease" = "true" ]; then
+            release_type="beta"
+          else
+            release_type="release"
+          fi
+          # Pipe metadata via stdin: curl scans inline -F content for
+          # ';type='/';filename='/';headers=' options, and any ';' in the
+          # changelog (e.g. "login; `/wg status`") corrupts the field.
+          printf '%s' "$body" > /tmp/cf-changelog.md
+          changelog_json="$(jq --slurp --raw-input '.' < /tmp/cf-changelog.md)"
+          metadata="$(jq -c -n \
+            --arg name "$name" \
+            --arg release_type "$release_type" \
+            --argjson changelog "$changelog_json" \
+            '{displayName: $name, releaseType: $release_type, changelog: $changelog, changelogType: "markdown", gameVersions: [17053]}')"
+          printf '%s' "$metadata" | curl -sS --fail-with-body \
+            -H "X-Api-Token: $CF_API_TOKEN" \
+            -F "metadata=<-" \
+            -F "file=@${ZIP}" \
+            https://wow.curseforge.com/api/projects/1799776/upload-file
