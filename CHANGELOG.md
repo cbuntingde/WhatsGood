@@ -6,7 +6,15 @@ All notable changes to WhatsGood are documented here.
 
 - Drag-to-add: drop an item from your bags onto the Custom Items list to
   protect it. Dropping onto a row or the empty area both count, and the
-  item goes back to its bag slot. Shift-click into the input box still works.
+  item goes back to its bag slot. The confirmation message shows the item
+  name and ID.
+- Custom list rows show item names (e.g. "Chunk of Boar Meat") instead of
+  `item:769`. The name is saved when an item is added from a link, so it
+  still shows before the client has cached the item. Items added by ID
+  alone show the name once the client knows it.
+- Removed the shift-click input box and its Add / Remove buttons. Use
+  drag-to-add, `/wg add <item link|itemID>`, `/wg remove ...`, or the row
+  X button instead.
 
 ## [1.6.0] - 2026-11-11
 
