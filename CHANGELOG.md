@@ -2,7 +2,7 @@
 
 All notable changes to WhatsGood are documented here.
 
-## [Unreleased]
+## [1.6.0] - 2026-11-11
 
 - Quest-log item memory: items named by your active quests (the quest
   log's special items) are learned as soon as they appear in your bags,
@@ -10,18 +10,12 @@ All notable changes to WhatsGood are documented here.
   protected after the quest ends. Toggle with `/wg questlog on|off` or
   the Options checkbox (on by default). Clients without the quest-log API
   fail open.
-- Quality chips: white labels and a thicker gold edge on the active chip,
-  so the selected threshold reads clearly.
-- Version references corrected to WoW Forever 1.16.1.
-- Headless tests extended to 115 checks (quest-log learning, toggle,
-  missing-API fail-open, panel checkbox sync, minimap badge file).
-- Custom minimap icon: a 64x64 badge (gold rim, leather bag, gold coin)
-  replaces the stock bag icon. The badge carries its own rim, so
-  Blizzard's tracking ring is no longer layered on top.
-- README and CHANGELOG brought in line with the current code.
-
-## [1.6.0] - 2026-11-11
-
+- Custom minimap icon: a 64x64 gold-rimmed badge (leather bag, gold coin)
+  in `Media/WhatsGoodMinimap.tga` replaces the stock bag icon. The badge
+  carries its own rim, so Blizzard's tracking ring is no longer layered on.
+- Quality threshold is six quality chips in the game's own colors, not a
+  slider. The active chip is lit with a gold edge, and a live "Guarding ..."
+  status line in the header names what is protected.
 - Native WoW dialog look: the settings panel now wears the classic
   DialogBox stone background and gold border, a title banner with the
   addon name, and a corner close button, instead of the flat dark
@@ -30,17 +24,16 @@ All notable changes to WhatsGood are documented here.
   constants, and the panel height is derived from a layout cursor, so
   widgets can no longer overlap or drift.
 - Protection guards and behavior toggles split into two sections; every
-  checkbox explains its rule on hover. The quality slider's own label
-  shows the live threshold in the quality's color.
+  checkbox explains its rule on hover.
 - Custom items are a real scrolling list: item icon, quality-colored
   name, item tooltip on hover, and a per-row remove button, with an
   empty-state note and a live count. Names resolve as soon as item info
   arrives while the panel is open.
-- Minimap button wears Blizzard's round tracking ring, like the default
-  minimap buttons.
-- Headless tests extended to 100 checks, including widget-mock layout
-  assertions (bounds, overlaps, column/row pitch), refresh sync, list
-  add/remove/scroll, and every close path.
+- Version references corrected to WoW Forever 1.16.1.
+- Headless tests: 115 checks, including widget-mock layout assertions
+  (bounds, overlaps, column/row pitch), refresh sync, list
+  add/remove/scroll, every close path, quest-log learning, and the
+  minimap badge file.
 
 ## [1.5.0] - 2026-11-11
 
