@@ -10,6 +10,9 @@ desktop.ini
 .vscode/
 *.code-workspace
 
+# Agent / plugin state (local memory, session files)
+.agents/
+
 # Build / packaging artifacts
 *.zip
 *.tar.gz
