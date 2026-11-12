@@ -12,6 +12,8 @@ Built for **WoW Forever** (game version 1.60.1, `Interface: 16001`).
 - **Blocks accidental trade / mail / auction** by hooking the slot-click sinks when the cursor holds a protected item, plus `AcceptTrade` / `SendMail` / `StartAuction` final-action guards for items placed before protection was enabled (fail-open when the client lacks the query API).
 - **Hold Shift to bypass** protection on every guard.
 - **Tooltip note:** protected bag, bank, and equipped items get a `WhatsGood: protected (won't auto-sell)` line via `GameTooltip:SetBagItem` / `SetInventoryItem`.
+- **Learns quest items:** tooltip-discovered quest items are remembered across sessions, so they are protected from the first sighting after every login.
+- **`/wg audit`:** read-only gap finder listing unprotected bag items with reasons, so misses can be added with `/wg add`.
 
 ## What gets protected
 
@@ -43,8 +45,9 @@ Junk (quality `0`) is never protected unless it is a quest item (with quest prot
 - `/wg add <shift-click link|itemID>` — always protect an item
 - `/wg remove <shift-click link|itemID>` — unprotect a custom item
 - `/wg list` — show custom list
+- `/wg audit` — list unprotected bag items with reasons (read-only)
 - `/wg selljunk` — sell unprotected poor-quality bag items to the open merchant
-- `/wg reset` — restore all settings to defaults (clears the custom list)
+- `/wg reset` — restore all settings to defaults (clears the custom list, keeps learned quest items)
 - `/wg refresh` — re-dim all bags
 
 Settings panel (`/wg`) has checkboxes, a quality slider, a custom-list count, and Sell Junk / Reset / Close buttons (draggable, `Esc` closes). Corrupt settings are sanitized on load.
@@ -70,9 +73,9 @@ Settings persist per account in the `WhatsGoodDB` SavedVariable.
 
 ## Files
 
-- `WhatsGood.toc` — addon manifest (`Interface: 16001`, version `1.3.0`)
+- `WhatsGood.toc` — addon manifest (`Interface: 16001`, version `1.4.0`)
 - `WhatsGood.lua` — all logic (classification, dimming, sell/delete/trade/mail/auction guards, panel, minimap button, slash commands)
-- `tests/run.lua` — headless stub-harness tests (`lua tests/run.lua`, no client needed, 52 checks)
+- `tests/run.lua` — headless stub-harness tests (`lua tests/run.lua`, no client needed, 60 checks)
 - Public API for other addons/skins: `WhatsGood_IsProtected(bag, slot)`, `WhatsGood_Reason(bag, slot)`, `WhatsGood_IsProtectedID(itemID, link)` — all fail-safe (never error)
 - `.github/workflows/ci.yml` — syntax check + tests on Lua 5.1
 - `CHANGELOG.md` — release notes

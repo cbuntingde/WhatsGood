@@ -2,6 +2,17 @@
 
 All notable changes to WhatsGood are documented here.
 
+## [1.4.0] - 2026-11-12
+
+- Learned quest memory: tooltip-discovered quest items are remembered in
+  `WhatsGoodDB.learned`, so they stay protected from the first sighting after
+  every login. Survives `/wg reset`; corrupt entries are pruned on load.
+- `/wg audit`: read-only gap finder listing unprotected bag items with the
+  reason each was left alone (capped at 25 lines plus a summary count).
+- `/wg status` now reports the learned count too.
+- Headless stub-harness tests extended (`lua tests/run.lua`, 60 checks),
+  including a simulated fresh login proving learned protection persists.
+
 ## [1.3.0] - 2026-11-12
 
 - Bound-item protection: the soulbound rule now also covers Bind-on-Equip /

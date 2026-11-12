@@ -428,6 +428,50 @@ check(_G.ContainerFrame1.Items[1].wgDimmed == true, "frame before gap dimmed")
 check(_G.ContainerFrame3.Items[1].wgDimmed == true, "frame after gap still scanned")
 _G.ContainerFrame1, _G.ContainerFrame3 = nil, nil
 
+-- ---------- 21. learned quest memory persists across sessions ----------
+
+_G.INFO[6001] = { name = "Relic Fragment", quality = 1, itype = "Miscellaneous" }
+_G.SLOTS["0:6"] = "item:6001"
+setTip({ "Quest Item" })
+nocursor()
+_G._MERCHANT, _G.USE_CALLS = true, {}
+UseContainerItem(0, 6)
+check(#_G.USE_CALLS == 0, "quest item blocked on first sighting")
+check(_G.WhatsGoodDB.learned[6001] == true, "quest find remembered")
+
+-- Simulate a fresh login: reload the addon with the saved DB intact.
+dofile(dir .. "../WhatsGood.lua")
+onEvent = handlers.OnEvent
+onEvent(nil, "ADDON_LOADED", "WhatsGood")
+setTip({}) -- tooltip now resolves to nothing: learned memory must carry it
+_G.USE_CALLS = {}
+UseContainerItem(0, 6)
+check(#_G.USE_CALLS == 0, "learned quest item stays protected after reload")
+
+-- Reset keeps observed facts while restoring settings.
+wg("threshold 1")
+wg("reset")
+check(_G.WhatsGoodDB.qualityThreshold == 3, "reset still restores threshold")
+check(_G.WhatsGoodDB.learned[6001] == true, "reset keeps learned quest items")
+
+-- ---------- 22. audit lists unprotected bag items with reasons ----------
+
+_G.SLOTS["0:1"], _G.SLOTS["0:2"], _G.SLOTS["0:3"] = "item:4001", "item:4002", "item:6002"
+_G.NUMSLOTS = { [0] = 3 }
+setTip({})
+local chatBefore = #_G.CHAT
+wg("audit")
+local foundJunk, foundSummary, leakedEpic = false, false, false
+for i = chatBefore + 1, #_G.CHAT do
+  local m = _G.CHAT[i]
+  if m:find("item:4001", 1, true) then foundJunk = true end
+  if m:find("audit:", 1, true) then foundSummary = true end
+  if m:find("item:4002", 1, true) then leakedEpic = true end
+end
+check(foundJunk, "audit lists the unprotected grey")
+check(foundSummary, "audit prints a summary line")
+check(not leakedEpic, "audit omits protected items")
+
 -- ---------- summary ----------
 
 print(string.format("done: %d pass %d fail", PASS, FAIL))

@@ -5,7 +5,7 @@
 local ADDON = ...
 if type(ADDON) ~= "string" then ADDON = "WhatsGood" end
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 
 -- Classic Hearthstone plus room for future stones (matched by ID or name).
 local HEARTHSTONE_IDS = { [6948] = true } -- extend here for future stones
@@ -22,6 +22,7 @@ local DEFAULTS = {
   minimapShown = true,
   minimapAngle = 215, -- degrees around the minimap, 0 = east
   custom = {}, -- [itemID] = true, always protected
+  learned = {}, -- [itemID] = true, quest items remembered across sessions
 }
 
 local db --- SavedVariables table (WhatsGoodDB)
@@ -139,6 +140,12 @@ local function WG_Scan(itemID, link)
       end
     end
   end
+  -- Remember quest finds across sessions: the next login protects this
+  -- item from the first sighting, no rescan needed. Factual observation,
+  -- not a setting, so it survives /wg reset.
+  if (cached.quest or cached.starter) and db ~= nil and type(db.learned) == "table" then
+    db.learned[itemID] = true
+  end
   tip:ClearLines()
   -- Only trust the scan once the tooltip actually resolved. Items whose info
   -- has not arrived yet keep rescanning on later updates (e.g. after
@@ -153,6 +160,7 @@ local function WG_Classify(itemID, link)
   -- returns protected (bool), reason (string)
   if not itemID then return false, "none" end
   if db.custom[itemID] then return true, "listed" end
+  if type(db.learned) == "table" and db.learned[itemID] then return true, "learned" end
   if db.protectHearth and HEARTHSTONE_IDS[itemID] then return true, "hearthstone" end
 
   local name, _, quality, _, _, itype
@@ -927,25 +935,32 @@ end
 -- ---------- slash commands ----------
 
 local function WG_Status()
-  Msg(string.format("WhatsGood %s: quest=%s bound=%s hearth=%s trade=%s mail=%s auction=%s autosell=%s sound=%s quality>=%d custom=%d (Shift bypasses; /wg help)",
+  local learnedN = 0
+  if type(db.learned) == "table" then
+    for _ in pairs(db.learned) do learnedN = learnedN + 1 end
+  end
+  Msg(string.format("WhatsGood %s: quest=%s bound=%s hearth=%s trade=%s mail=%s auction=%s autosell=%s sound=%s quality>=%d custom=%d learned=%d (Shift bypasses; /wg help)",
     VERSION,
     tostring(db.protectQuest), tostring(db.protectSoulbound), tostring(db.protectHearth),
     tostring(db.protectTrade), tostring(db.protectMail), tostring(db.protectAuction),
     tostring(db.autosell),
     tostring(db.warnSound),
-    WG_ClampQuality(db.qualityThreshold), WG_CustomCount()))
+    WG_ClampQuality(db.qualityThreshold), WG_CustomCount(), learnedN))
 end
 
 -- Restore every setting to its default (clears the custom list too).
 -- Global so the settings panel Reset button can reach it.
 function WG_ResetDB()
   if not db then Msg("still loading, try again in a moment."); return end
+  -- Learned quest items are observed facts, not settings: keep them.
+  local keep = db.learned
   for k, v in pairs(DEFAULTS) do
-    if k == "custom" then db[k] = {} else db[k] = v end
+    if k == "custom" or k == "learned" then db[k] = {} else db[k] = v end
   end
+  if type(keep) == "table" then db.learned = keep end
   WG_ApplyAndRefresh()
   WG_SyncMinimap()
-  Msg("settings reset to defaults.")
+  Msg("settings reset to defaults (learned quest items kept).")
 end
 
 -- Manual junk run: sells unprotected poor-quality bag items to the open
@@ -999,6 +1014,54 @@ function WG_SellJunk()
   Msg("sold " .. n .. " junk item(s).")
 end
 
+-- Read-only gap finder: lists bag items nothing protects, with the reason
+-- each one was left alone, so misses can be added with /wg add. Never
+-- sells, moves, or protects anything itself.
+local function WG_Audit()
+  if not db then Msg("still loading, try again in a moment."); return end
+  local seen, order = {}, {}
+  local total, nunprot = 0, 0
+  for bag = 0, (NUM_BAG_SLOTS or 4) do
+    local slots = 0
+    if type(GetContainerNumSlots) == "function" then
+      local ok, count = pcall(GetContainerNumSlots, bag)
+      if ok and type(count) == "number" then slots = count end
+    end
+    for slot = 1, slots do
+      local link = WG_GetLink(bag, slot)
+      if link then
+        total = total + 1
+        local id = WG_ItemID(link)
+        if id then
+          local okP, protected, reason = pcall(WG_Classify, id, link)
+          if okP and not protected then
+            nunprot = nunprot + 1
+            local e = seen[id]
+            if not e then
+              e = { link = link, count = 0, reason = reason or "normal" }
+              seen[id] = e
+              table.insert(order, id)
+            end
+            e.count = e.count + 1
+          end
+        end
+      end
+    end
+  end
+  if nunprot == 0 then
+    Msg(string.format("audit: everything in your bags is protected (%d item(s) checked).", total))
+    return
+  end
+  local shown = math.min(#order, 25)
+  for i = 1, shown do
+    local e = seen[order[i]]
+    Msg(" - " .. tostring(e.link) .. (e.count > 1 and (" x" .. e.count) or "")
+      .. " (" .. tostring(e.reason) .. ")")
+  end
+  Msg(string.format("audit: %d unprotected item(s) of %d checked%s. /wg add <link|id> protects one.",
+    nunprot, total, (#order > shown) and (" (+" .. (#order - shown) .. " more)") or ""))
+end
+
 local function WG_HandleSlash(input)
   if not db then Msg("still loading, try again in a moment."); return end
   input = WG_Trim(input)
@@ -1007,12 +1070,13 @@ local function WG_HandleSlash(input)
   rest = WG_Trim(rest)
   if cmd == "" then WG_TogglePanel(); return end
   if cmd == "help" then
-    Msg("/wg opens settings. threshold 0-5 | quest|soulbound|hearth|trade|mail|auction|autosell|minimap|sound on|off | add <link|id> | remove <link|id> | list | selljunk | reset | refresh | status")
+    Msg("/wg opens settings. threshold 0-5 | quest|soulbound|hearth|trade|mail|auction|autosell|minimap|sound on|off | add <link|id> | remove <link|id> | list | audit | selljunk | reset | refresh | status")
     return
   end
   if cmd == "status" then WG_Status(); return end
   if cmd == "refresh" then WG_UpdateAll(); Msg("bags refreshed."); return end
   if cmd == "selljunk" then WG_SellJunk(); return end
+  if cmd == "audit" then WG_Audit(); return end
   if cmd == "reset" then WG_ResetDB(); return end
   if cmd == "threshold" then
     local n = tonumber(rest)
@@ -1099,12 +1163,16 @@ end)
 local function WG_SanitizeDB()
   for k, v in pairs(DEFAULTS) do
     if db[k] == nil then
-      -- Copy tables by value: sharing DEFAULTS.custom by reference would
+      -- Copy tables by value: sharing a DEFAULTS table by reference would
       -- let /wg add mutate the defaults for the rest of the session.
-      if k == "custom" then db[k] = {} else db[k] = v end
+      if k == "custom" or k == "learned" then db[k] = {} else db[k] = v end
     end
   end
   if type(db.custom) ~= "table" then db.custom = {} end
+  if type(db.learned) ~= "table" then db.learned = {} end
+  for id in pairs(db.learned) do
+    if type(id) ~= "number" or id <= 0 then db.learned[id] = nil end
+  end
   for id in pairs(db.custom) do
     if type(id) ~= "number" or id <= 0 then db.custom[id] = nil end
   end
