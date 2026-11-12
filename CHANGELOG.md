@@ -2,6 +2,12 @@
 
 All notable changes to WhatsGood are documented here.
 
+## [Unreleased]
+
+- Drag-to-add: drop an item from your bags onto the Custom Items list to
+  protect it. Dropping onto a row or the empty area both count, and the
+  item goes back to its bag slot. Shift-click into the input box still works.
+
 ## [1.6.0] - 2026-11-11
 
 - Quest-log item memory: items named by your active quests (the quest

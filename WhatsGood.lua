@@ -845,6 +845,20 @@ local function WG_RemoveCustom(id)
   WG_ApplyAndRefresh()
 end
 
+-- Drag-to-add: an item dragged from a bag lands on the cursor. Dropping it on
+-- the custom list (OnReceiveDrag, or a click while holding it) protects it and
+-- clears the cursor, which returns the item to its bag slot. Non-item cursor
+-- contents (money, spells, ...) are ignored.
+local function WG_CursorDrop()
+  if type(GetCursorInfo) ~= "function" then return end
+  local okC, ctype, cid, clink = pcall(GetCursorInfo)
+  if not okC or ctype ~= "item" then return end
+  local id = tonumber(cid) or WG_ParseItemText(clink)
+  if not id then return end
+  WG_AddCustom(id)
+  if type(ClearCursor) == "function" then pcall(ClearCursor) end
+end
+
 -- Quality color escapes: the client's table when present, else the standard
 -- palette so headless tests and odd clients still color item names.
 local QUALITY_HEX = {
@@ -947,6 +961,8 @@ local function WG_MakeListRow()
   local row = CreateFrame("Button", nil, customChild)
   row:SetHeight(LIST_ROW_H)
   row:RegisterForClicks("LeftButtonUp")
+  row:SetScript("OnReceiveDrag", WG_CursorDrop)
+  row:SetScript("OnMouseUp", WG_CursorDrop)
   if row.SetHighlightTexture then
     pcall(row.SetHighlightTexture, row, "Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
   end
@@ -1351,6 +1367,12 @@ local function WG_BuildPanel()
   customChild:SetWidth(PANEL_W - PAD * 2 - 36)
   customChild:SetHeight(1)
   customScroll:SetScrollChild(customChild)
+  -- Drop targets: the list area and its child (empty space) take bag drops.
+  for _, f in ipairs({ customScroll, customChild }) do
+    pcall(f.EnableMouse, f, true)
+    f:SetScript("OnReceiveDrag", WG_CursorDrop)
+    f:SetScript("OnMouseUp", WG_CursorDrop)
+  end
   customBar = CreateFrame("Slider", "WhatsGoodCustomScrollBar", customScroll,
     "UIPanelScrollBarTemplate")
   customBar:SetPoint("TOPLEFT", customScroll, "TOPRIGHT", 2, -16)
@@ -1369,7 +1391,7 @@ local function WG_BuildPanel()
   customEmpty = customChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   customEmpty:SetPoint("CENTER", customChild, "CENTER", 0, 0)
   customEmpty:SetJustifyH("CENTER")
-  customEmpty:SetText("No custom items yet.\nShift-click an item into the box below.")
+  customEmpty:SetText("No custom items yet.\nDrag an item from your bags here,\nor shift-click one into the box below.")
   y = y - LIST_H - 10
 
   -- Input row: shift-click box plus Add / Remove, same validation as /wg.
