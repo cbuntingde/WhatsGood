@@ -204,6 +204,17 @@ _G.UseContainerItem = function(bag, slot)
   table.insert(_G.USE_CALLS, bag .. ":" .. slot)
 end
 _G.PickupContainerItem = function() end
+-- Modern entry points: the addon prefers C_Container for links, slots, and
+-- use. Mirror the vanilla stubs so both paths execute the same bag state.
+_G.C_USE_CALLS = {}
+_G.C_Container = {
+  GetContainerItemLink = function(bag, slot) return _G.SLOTS[bag .. ":" .. slot] end,
+  GetContainerNumSlots = function(bag) return _G.NUMSLOTS[bag] or 0 end,
+  UseContainerItem = function(bag, slot)
+    table.insert(_G.C_USE_CALLS, bag .. ":" .. slot)
+  end,
+  PickupContainerItem = function() end,
+}
 _G.DELETE_CALLS = 0
 _G.DeleteCursorItem = function() _G.DELETE_CALLS = _G.DELETE_CALLS + 1 end
 _G.ClearCursor = function() _G._CURSOR = false end
@@ -240,7 +251,23 @@ local onEvent = handlers.OnEvent
 check(type(onEvent) == "function", "addon registers OnEvent")
 onEvent(nil, "ADDON_LOADED", "WhatsGood")
 
+-- Pristine use entry points, captured before the addon wraps them. The
+-- regression test for protected-use asserts these are restored whenever
+-- the merchant window is closed (no insecure wrapper on the secure path).
+local pristineUse = _G.UseContainerItem
+local pristineCUse = _G.C_Container.UseContainerItem
+
 local function wg(cmd) _G.SlashCmdList["WHATSGOOD"](cmd) end
+-- Merchant flow goes through events, like the real client: opening engages
+-- the sell guard, closing removes it again.
+local function merchOpen()
+  _G._MERCHANT = true
+  handlers.OnEvent(nil, "MERCHANT_SHOW")
+end
+local function merchClosed()
+  _G._MERCHANT = false
+  handlers.OnEvent(nil, "MERCHANT_CLOSED")
+end
 local function nocursor()
   _G._CURSOR, _G._CURSOR_TYPE, _G._CURSOR_ID, _G._CURSOR_LINK = false, nil, nil, nil
   _G._SHIFT = false
@@ -257,7 +284,8 @@ setTip({})
 -- ---------- 1. unknown items fail open (documented), quest items protect ----------
 
 _G.SLOTS["0:1"] = "item:1001" -- no INFO: client has never seen it
-_G._MERCHANT, _G.USE_CALLS = true, {}
+merchOpen()
+_G.USE_CALLS = {}
 UseContainerItem(0, 1)
 check(#_G.USE_CALLS == 1, "uncached unknown item still sells (fail-open window)")
 
@@ -373,7 +401,8 @@ _G.INFO[4001] = { name = "Broken Fang", quality = 0, itype = "Junk" }
 _G.INFO[4002] = { name = "Epic Sword", quality = 4, itype = "Weapon" }
 _G.SLOTS["0:1"], _G.SLOTS["0:2"] = "item:4001", "item:4002"
 _G.NUMSLOTS = { [0] = 2 }
-_G._MERCHANT, _G.USE_CALLS = true, {}
+merchOpen()
+_G.USE_CALLS = {}
 nocursor() -- selljunk refuses while the cursor holds anything
 setTip({})
 wg("selljunk")
@@ -416,7 +445,8 @@ _G.INFO[5001] = { name = "Green BoE Chest", quality = 2, itype = "Armor" }
 _G.SLOTS["0:4"] = "item:5001"
 setTip({ "Binds when equipped" })
 nocursor()
-_G._MERCHANT, _G.USE_CALLS = true, {}
+merchOpen()
+_G.USE_CALLS = {}
 UseContainerItem(0, 4)
 check(#_G.USE_CALLS == 0, "boe green is protected")
 wg("soulbound off")
@@ -537,7 +567,8 @@ _G.INFO[6001] = { name = "Relic Fragment", quality = 1, itype = "Miscellaneous" 
 _G.SLOTS["0:6"] = "item:6001"
 setTip({ "Quest Item" })
 nocursor()
-_G._MERCHANT, _G.USE_CALLS = true, {}
+merchOpen()
+_G.USE_CALLS = {}
 UseContainerItem(0, 6)
 check(#_G.USE_CALLS == 0, "quest item blocked on first sighting")
 check(_G.WhatsGoodDB.learned[6001] == true, "quest find remembered")
@@ -575,22 +606,50 @@ check(foundJunk, "audit lists the unprotected grey")
 check(foundSummary, "audit prints a summary line")
 check(not leakedEpic, "audit omits protected items")
 
--- ---------- 23. protected items stay usable (sell guard fails open) ----------
+-- ---------- 23. protected items stay usable (guard only lives at the vendor) ----------
 
 nocursor()
 _G.SLOTS["0:7"] = "item:6948" -- Hearthstone: always protected, must stay usable
 setTip({})
-_G._MERCHANT, _G.USE_CALLS = false, {}
+-- Closing the merchant restores the pristine entry points: with the window
+-- shut there must be no insecure wrapper left on the secure use path (this
+-- is what blocked Hearthstone/potions on modern clients).
+merchClosed()
+_G.USE_CALLS, _G.C_USE_CALLS = {}, {}
 local okUse = pcall(UseContainerItem, 0, 7)
 check(okUse and #_G.USE_CALLS == 1, "protected item usable with merchant closed")
-_G._MERCHANT, _G.USE_CALLS = true, {}
+local okCUse = pcall(_G.C_Container.UseContainerItem, 0, 7)
+check(okCUse and #_G.C_USE_CALLS == 1, "protected item usable via C_Container with merchant closed")
+check(UseContainerItem == pristineUse, "global use path pristine with merchant closed")
+check(_G.C_Container.UseContainerItem == pristineCUse, "C use path pristine with merchant closed")
+merchOpen()
+_G.USE_CALLS, _G.C_USE_CALLS = {}, {}
 local okSell = pcall(UseContainerItem, 0, 7)
 check(okSell and #_G.USE_CALLS == 0, "protected item still sell-blocked with merchant open")
+local okCSell = pcall(_G.C_Container.UseContainerItem, 0, 7)
+check(okCSell and #_G.C_USE_CALLS == 0, "protected item still sell-blocked via C_Container")
+-- Opening twice must not stack wrappers; closing restores pristine.
+local hookedOnce, hookedTwice = UseContainerItem, _G.C_Container.UseContainerItem
+handlers.OnEvent(nil, "MERCHANT_SHOW")
+check(UseContainerItem == hookedOnce, "repeat merchant open does not re-wrap")
+check(_G.C_Container.UseContainerItem == hookedTwice, "repeat merchant open does not re-wrap C path")
+merchClosed()
+check(UseContainerItem == pristineUse, "merchant close restores pristine use")
+check(_G.C_Container.UseContainerItem == pristineCUse, "merchant close restores pristine C use")
+-- Missed close event: the first merchant-closed use self-heals the wrapper.
+merchOpen()
+_G._MERCHANT = false -- close happened, event lost
+_G.USE_CALLS = {}
+local okHeal = pcall(UseContainerItem, 0, 7)
+check(okHeal and #_G.USE_CALLS == 1, "missed close still uses after self-heal")
+check(UseContainerItem == pristineUse, "self-heal removes the stale wrapper")
 _G.MerchantFrame = { IsShown = function() error("boom") end }
-_G._MERCHANT, _G.USE_CALLS = false, {}
+merchOpen()
+_G.USE_CALLS = {}
 local okBoom = pcall(UseContainerItem, 0, 7)
 check(okBoom and #_G.USE_CALLS == 1, "merchant-check error fails open (use works)")
 _G.MerchantFrame = { IsShown = function() return _G._MERCHANT end }
+merchClosed()
 
 -- ---------- 24. settings panel: native dialog build, layout, widgets ----------
 

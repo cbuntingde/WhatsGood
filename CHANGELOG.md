@@ -2,6 +2,22 @@
 
 All notable changes to WhatsGood are documented here.
 
+## [1.7.1] - 2026-11-14
+
+- Fixed: protected items (Hearthstone, potions, food, ...) are usable again
+  on modern clients. The `UseContainerItem` / `C_Container.UseContainerItem`
+  sell guard is now installed only while the merchant window is open
+  (`MERCHANT_SHOW` engages it, `MERCHANT_CLOSED` removes it, and a missed
+  close self-heals on the next merchant-closed use). A permanently installed
+  insecure wrapper tainted the secure use path, so protected casts were
+  blocked as "only available to the Blizzard UI" even with the merchant
+  closed. Vendor / delete / trade / mail / auction protection is unchanged.
+- Hardened the merchant check (probed by value, never by frame type) and
+  `pcall`-guarded the Shift bypass, matching the other guards.
+- Headless tests drive the merchant through events, cover the previously
+  untested `C_Container` path, and assert both use paths are pristine
+  whenever the merchant is closed (137 checks).
+
 ## [1.7.0] - 2026-11-12
 
 - Drag-to-add: drop an item from your bags onto the Custom Items list to

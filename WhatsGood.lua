@@ -5,7 +5,7 @@
 local ADDON = ...
 if type(ADDON) ~= "string" then ADDON = "WhatsGood" end
 
-local VERSION = "1.7.0"
+local VERSION = "1.7.1"
 
 -- Classic Hearthstone plus room for future stones (matched by ID or name).
 local HEARTHSTONE_IDS = { [6948] = true } -- extend here for future stones
@@ -498,11 +498,15 @@ end
 
 -- Merchant visibility, fail-open: any missing global or client error means
 -- "not open". Protection must never brick UseContainerItem (using a
--- hearthstone, potion, or food) just because this check misfires.
+-- hearthstone, potion, or food) just because this check misfires. The frame
+-- is probed by value, never by type: modern clients may expose UI objects
+-- that are not plain tables.
 local function WG_MerchantOpen()
-  if type(MerchantFrame) ~= "table" then return false end
-  if type(MerchantFrame.IsShown) ~= "function" then return false end
-  local ok, shown = pcall(MerchantFrame.IsShown, MerchantFrame)
+  local mf = MerchantFrame
+  if mf == nil then return false end
+  local isShown = mf.IsShown
+  if type(isShown) ~= "function" then return false end
+  local ok, shown = pcall(isShown, mf)
   return ok and shown and true or false
 end
 
@@ -513,7 +517,10 @@ local function WG_SellBlocked(bag, slot)
   if not WG_MerchantOpen() then
     return false
   end
-  if IsShiftKeyDown and IsShiftKeyDown() then return false end
+  if type(IsShiftKeyDown) == "function" then
+    local okS, down = pcall(IsShiftKeyDown)
+    if okS and down then return false end
+  end
   local ok, protected = pcall(WG_IsProtectedSlot, bag, slot)
   if ok and protected then
     Warn("Not selling " .. WG_LinkText(bag, slot) .. " (protected). Hold Shift to force.")
@@ -576,27 +583,73 @@ local function WG_SlotSetBlocked(action, flag, count, getter)
   return false
 end
 
+-- Use-path wrappers, installed only while the merchant window is open.
+-- On modern (Midnight-restricted) clients the container use call is a
+-- protected function on the secure path. Parking an insecure wrapper on it
+-- permanently taints every bag right-click, so protected casts
+-- (Hearthstone, potions, food) are blocked as "only available to the
+-- Blizzard UI" even with the merchant closed. Gating the wrapper on
+-- MERCHANT_SHOW / MERCHANT_CLOSED keeps normal use pristine: right-click
+-- with the merchant open sells (blockable), with it closed uses (untouched).
+local useWrapper, usePrev, cUseWrapper, cUsePrev = nil, nil, nil, nil
+
+local function WG_UnhookUse()
+  if useWrapper ~= nil and UseContainerItem == useWrapper then
+    UseContainerItem = usePrev or origUse
+  end
+  if cUseWrapper ~= nil and type(C_Container) == "table"
+    and C_Container.UseContainerItem == cUseWrapper then
+    C_Container.UseContainerItem = cUsePrev or origCUse
+  end
+end
+
+local function WG_HookUse()
+  if origUse ~= nil and useWrapper ~= nil and UseContainerItem ~= useWrapper then
+    usePrev = UseContainerItem
+    UseContainerItem = useWrapper
+  end
+  if origCUse ~= nil and cUseWrapper ~= nil and type(C_Container) == "table"
+    and C_Container.UseContainerItem ~= cUseWrapper then
+    cUsePrev = C_Container.UseContainerItem
+    C_Container.UseContainerItem = cUseWrapper
+  end
+end
+
 local function WG_InstallBlocks()
-  if not origUse and type(UseContainerItem) == "function" then
+  -- Capture pristine originals once (first load wins). A stale wrapper left
+  -- by a pre-reload chunk still delegates correctly and self-heals away on
+  -- the first merchant-closed use, so reloads converge instead of stacking.
+  if origUse == nil and type(UseContainerItem) == "function" then
     origUse = UseContainerItem
-    UseContainerItem = function(bag, slot, ...)
-      -- Fail-open: any error in the sell check must still let the item be
-      -- used; only a confirmed protected+merchant-open sale is blocked.
+  end
+  if origCUse == nil and C_Container
+    and type(C_Container.UseContainerItem) == "function" then
+    origCUse = C_Container.UseContainerItem
+  end
+  if useWrapper == nil and origUse ~= nil then
+    local pristine = origUse
+    useWrapper = function(bag, slot, ...)
+      -- Missed close event: heal on the first merchant-closed use, before
+      -- any block check, so use can never wedge shut.
+      if not WG_MerchantOpen() then WG_UnhookUse() end
+      -- Fail-open: any error in the sell check must still let the sale
+      -- attempt reach the original; only a confirmed protected sale blocks.
       local okB, blocked = pcall(WG_SellBlocked, bag, slot)
       if okB and blocked then return end
-      return origUse(bag, slot, ...)
+      return pristine(bag, slot, ...)
     end
   end
 
-  -- Retail entry point: C_Container.UseContainerItem. Hooked with the same
-  -- rule so retail clients get identical protection.
-  if not origCUse and C_Container and type(C_Container.UseContainerItem) == "function" then
-    origCUse = C_Container.UseContainerItem
-    C_Container.UseContainerItem = function(bag, slot, ...)
+  -- Retail entry point: C_Container.UseContainerItem. Same rule and same
+  -- merchant-gating so retail clients get identical protection.
+  if cUseWrapper == nil and origCUse ~= nil then
+    local pristineC = origCUse
+    cUseWrapper = function(bag, slot, ...)
       -- Fail-open, same rule as the vanilla entry point above.
+      if not WG_MerchantOpen() then WG_UnhookUse() end
       local okB, blocked = pcall(WG_SellBlocked, bag, slot)
       if okB and blocked then return end
-      return origCUse(bag, slot, ...)
+      return pristineC(bag, slot, ...)
     end
   end
 
@@ -1640,7 +1693,11 @@ function WG_SellJunk()
       Msg("put away what is on the cursor first, then /wg selljunk."); return
     end
   end
-  local sell = origUse or UseContainerItem
+  -- Pristine originals bypass our own merchant guard (junk is never
+  -- protected, so the guard would pass anyway); fall back to the live
+  -- globals on clients where the pristine refs were never captured.
+  local sell = origUse or origCUse or UseContainerItem
+    or (C_Container and C_Container.UseContainerItem)
   if type(sell) ~= "function" then Msg("selling is not available here."); return end
   local n = 0
   for bag = 0, (NUM_BAG_SLOTS or 4) do
@@ -1901,9 +1958,14 @@ WG:SetScript("OnEvent", function(_, event, arg1)
     pcall(WG_SyncQuestLog)
     WG_QueueUpdate()
   elseif event == "MERCHANT_SHOW" then
+    -- Merchant open means right-click sells: engage the sell guard. It is
+    -- removed again on MERCHANT_CLOSED so normal use stays pristine.
+    WG_HookUse()
     WG_QueueUpdate()
     -- Auto-sell is opt-in (off by default): run the same manual junk pass.
     if db and db.autosell then WG_SellJunk() end
+  elseif event == "MERCHANT_CLOSED" then
+    WG_UnhookUse()
   end
 end)
 
@@ -1912,6 +1974,7 @@ WG:RegisterEvent("PLAYER_LOGIN")
 WG:RegisterEvent("BAG_UPDATE")
 WG:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 WG:RegisterEvent("MERCHANT_SHOW")
+pcall(WG.RegisterEvent, WG, "MERCHANT_CLOSED")
 pcall(WG.RegisterEvent, WG, "BAG_UPDATE_DELAYED")
 pcall(WG.RegisterEvent, WG, "GET_ITEM_INFO_RECEIVED")
 pcall(WG.RegisterEvent, WG, "QUEST_LOG_UPDATE")
